@@ -9,10 +9,12 @@ import os
 from connectonion import Agent, Memory, WebFetch, Shell, TodoList
 from connectonion.useful_plugins import re_act, gmail_plugin, calendar_plugin
 from tools import (
+    configure_draft_reply,
     configure_meeting_schedule,
     configure_weekly_summary,
     configure_writing_style,
     create_confirmed_meeting,
+    get_draft_reply_strategy,
     get_meeting_schedule_context,
     get_weekly_email_activity,
     get_writing_style_profile,
@@ -66,6 +68,7 @@ elif has_outlook:
 configure_weekly_summary(email_tool=email_tool, calendar_tool=calendar_tool)
 configure_meeting_schedule(email_tool=email_tool, calendar_tool=calendar_tool, memory_tool=memory)
 configure_writing_style(email_tool=email_tool)
+configure_draft_reply(email_tool=email_tool, memory_tool=memory)
 
 # Warn if no email provider configured
 if not tools:
@@ -120,6 +123,7 @@ tools.extend([
     get_meeting_schedule_context,
     create_confirmed_meeting,
     get_writing_style_profile,
+    get_draft_reply_strategy,
 ])
 
 # Create main agent
