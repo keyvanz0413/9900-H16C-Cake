@@ -195,6 +195,30 @@ get_draft_reply_strategy()
 
 ---
 
+### 2C. Urgency Query
+
+**Tools:**
+- `get_urgent_email_context(days=14, max_emails=30, include_unread=True, include_unanswered=True, mode="full")` - Structured read-only urgent email ranking
+
+**Workflow:**
+```
+get_urgent_email_context()
+  -> high/medium urgent_emails with evidence
+  -> low_priority and ignored_emails for noise
+  -> summary counts and top categories
+```
+
+**Guidelines:**
+- Use this when the user asks "Which emails are urgent?", "Show me what needs attention first", or similar.
+- Use the returned `urgent_emails` ranking as the source of truth.
+- Show high urgency first, then medium urgency.
+- Include the reason/evidence for each urgent item.
+- Mention promotional or automated emails only as deprioritized items when helpful.
+- This tool is independent from Weekly Summary in the first implementation.
+- This tool is read-only. Do not draft, send, archive, mark read, star, label, or create calendar events.
+
+---
+
 ### 3. Calendar & Scheduling
 
 **Tools:**
