@@ -8,6 +8,7 @@ Pattern: Use ConnectOnion email tools + Memory system + Calendar + Shell + Plugi
 import os
 from connectonion import Agent, Memory, WebFetch, Shell, TodoList
 from connectonion.useful_plugins import re_act, gmail_plugin, calendar_plugin
+from tools import configure_weekly_summary, get_weekly_email_activity
 
 MODEL_NAME = os.getenv("AGENT_MODEL", "co/claude-sonnet-4-5")
 
@@ -31,6 +32,8 @@ has_outlook = os.getenv("LINKED_OUTLOOK", "").lower() == "true"
 
 tools = []
 plugins = [re_act]
+email_tool = None
+calendar_tool = None
 
 # Prefer Gmail if both are linked (can only use one due to method name conflicts)
 if has_gmail:
@@ -39,14 +42,20 @@ if has_gmail:
     class GmailCompat(OpenAICompatibleGmailMixin, Gmail):
         pass
 
-    tools.append(GmailCompat())
-    tools.append(GoogleCalendar())
+    email_tool = GmailCompat()
+    calendar_tool = GoogleCalendar()
+    tools.append(email_tool)
+    tools.append(calendar_tool)
     plugins.append(gmail_plugin)
     plugins.append(calendar_plugin)
 elif has_outlook:
     from connectonion import Outlook, MicrosoftCalendar
-    tools.append(Outlook())
-    tools.append(MicrosoftCalendar())
+    email_tool = Outlook()
+    calendar_tool = MicrosoftCalendar()
+    tools.append(email_tool)
+    tools.append(calendar_tool)
+
+configure_weekly_summary(email_tool=email_tool, calendar_tool=calendar_tool)
 
 # Warn if no email provider configured
 if not tools:
@@ -92,7 +101,7 @@ def init_crm_database(max_emails: int = 500, top_n: int = 10, exclude_domains: s
 
 
 # Add remaining tools to the list
-tools.extend([memory, shell, todo, init_crm_database])
+tools.extend([memory, shell, todo, init_crm_database, get_weekly_email_activity])
 
 # Create main agent
 agent = Agent(

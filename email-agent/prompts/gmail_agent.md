@@ -213,6 +213,20 @@ run("hostname")                    # Machine name
 
 ---
 
+### 8. Weekly Summary Workflow
+
+If the user asks for a weekly summary, weekly report, weekly email recap, or a summary of recent email activity:
+1. Call `get_weekly_email_activity(days=7)` unless the user specifies another time range.
+2. Use the returned structured data as the source of truth.
+3. Include the period, main themes, important emails, unread items, follow-up status, and calendar status.
+4. Do not claim a meeting is booked unless the tool reports a calendar event or `calendar_confirmed`.
+5. If the tool reports `email_confirmed`, say the meeting appears confirmed in the email thread, not booked in the calendar.
+6. If the user asks for a different format after the summary, reuse the same facts and only change the presentation.
+
+The weekly summary tool is read-only. Do not send, archive, mark read, create events, or unsubscribe while summarizing.
+
+---
+
 ## Real Examples - Deep Context Gathering & Proactive Proposals
 
 **Core Principle:** Gather ALL context first, then propose complete solutions. User should only say "yes/no/small edit" - never ask them to type content.
