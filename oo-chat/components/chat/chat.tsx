@@ -1,0 +1,181 @@
+'use client'
+
+import { useMemo, useCallback, useState } from 'react'
+import { cn } from './utils'
+import { ChatMessages } from './chat-messages'
+import { ChatInput } from './chat-input'
+import { ChatError } from './chat-error'
+import { StatusBar } from './messages'
+import { UlwSetupPanel } from './ulw-setup-panel'
+import { UlwMonitorPanel } from './ulw-monitor-panel'
+import { UlwFullscreen } from './ulw-fullscreen'
+import type { ChatProps, ThinkingUI, UserUI } from './types'
+
+export function Chat({
+  ui = [],
+  onSend,
+  isLoading = false,
+  placeholder = 'Send a message...',
+  elapsedTime = 0,
+  pendingAskUser,
+  onAskUserResponse,
+  pendingApproval,
+  onApprovalResponse,
+  pendingOnboard,
+  onOnboardSubmit,
+  pendingUlwTurnsReached,
+  onUlwTurnsReachedResponse,
+  pendingPlanReview,
+  onPlanReviewResponse,
+  className,
+  statusBar,
+  mode,
+  ulwTurnsRemaining,
+  ulwSetupActive,
+  onUlwStart,
+  onUlwStop,
+  onUlwSetupCancel,
+  onUlwGoalSave,
+  onUlwDirectionSave,
+  ulwGoal = '',
+  ulwDirection = '',
+  sessionState,
+  connectionError,
+  onRetry,
+  hasSession,
+  onReconnect,
+  skills,
+}: ChatProps) {
+  const isUlwActive = mode === 'ulw'
+  const [ulwFullscreen, setUlwFullscreen] = useState(false)
+
+  // Extract thinking items for StatusBar
+  const thinkingItems = useMemo(
+    () => ui.filter((item): item is ThinkingUI => item.type === 'thinking'),
+    [ui]
+  )
+
+  // Pre-fill goal from last user message
+  const lastUserMessage = useMemo(() => {
+    for (let i = ui.length - 1; i >= 0; i--) {
+      if (ui[i].type === 'user') return (ui[i] as UserUI).content
+    }
+    return ''
+  }, [ui])
+
+  // Handle send - if there's a pending ask_user, respond to it; otherwise send normally
+  const handleSend = useCallback((content: string, images?: string[], files?: import('./types').FileAttachment[]) => {
+    if (pendingAskUser && onAskUserResponse) {
+      onAskUserResponse(content)
+    } else {
+      onSend(content, images, files)
+    }
+  }, [pendingAskUser, onAskUserResponse, onSend])
+
+  const inputPlaceholder = pendingAskUser
+    ? 'Type your answer or select an option above...'
+    : placeholder
+
+  const handleUlwStop = useCallback(() => {
+    setUlwFullscreen(false)
+    onUlwStop?.()
+  }, [onUlwStop])
+
+  // Determine which bottom panel to show
+  const renderBottom = () => {
+    if (isUlwActive && onUlwStop) {
+      return (
+        <UlwMonitorPanel
+          turnsRemaining={ulwTurnsRemaining ?? null}
+          ui={ui}
+          goal={ulwGoal}
+          direction={ulwDirection}
+          onGoalSave={onUlwGoalSave ?? (() => {})}
+          onDirectionSave={onUlwDirectionSave ?? (() => {})}
+          onStop={handleUlwStop}
+          onExpand={() => setUlwFullscreen(true)}
+        />
+      )
+    }
+
+    if (ulwSetupActive && onUlwStart && onUlwSetupCancel) {
+      return (
+        <UlwSetupPanel
+          initialGoal={ulwGoal || lastUserMessage}
+          onStart={onUlwStart}
+          onCancel={onUlwSetupCancel}
+        />
+      )
+    }
+
+    return (
+      <ChatInput
+        onSend={handleSend}
+        isLoading={isLoading}
+        placeholder={inputPlaceholder}
+        statusBar={statusBar}
+        skills={skills}
+      />
+    )
+  }
+
+  const isEmpty = ui.length === 0
+
+  return (
+    <div className={cn('flex h-full flex-col bg-white', className)}>
+      {isEmpty && isLoading ? (
+        <div className="flex-1 flex items-center justify-center">
+          <div className="text-center">
+            <div className="inline-block h-8 w-8 animate-spin rounded-full border-4 border-solid border-neutral-200 border-r-neutral-900 mb-4"></div>
+            <p className="text-sm text-neutral-500">Connecting to agent...</p>
+          </div>
+        </div>
+      ) : (
+        <>
+          {connectionError && (
+            <div className="p-4">
+              <ChatError
+                error={connectionError}
+                onRetry={onRetry}
+                onDismiss={onRetry ? () => onRetry() : undefined}
+              />
+            </div>
+          )}
+          <ChatMessages
+            ui={ui}
+            elapsedTime={elapsedTime}
+            isLoading={isLoading}
+            pendingApproval={pendingApproval}
+            onApprovalResponse={onApprovalResponse}
+            pendingAskUser={pendingAskUser}
+            onAskUserResponse={onAskUserResponse}
+            pendingOnboard={pendingOnboard}
+            onOnboardSubmit={onOnboardSubmit}
+            pendingUlwTurnsReached={pendingUlwTurnsReached}
+            onUlwTurnsReachedResponse={onUlwTurnsReachedResponse}
+            pendingPlanReview={pendingPlanReview}
+            onPlanReviewResponse={onPlanReviewResponse}
+          />
+        </>
+      )}
+      {/* Status bar between messages and input */}
+      <StatusBar thinkingItems={thinkingItems} sessionState={sessionState} />
+
+      {renderBottom()}
+
+      {/* Fullscreen ULW overlay — portal-like, covers entire viewport */}
+      {ulwFullscreen && isUlwActive && (
+        <UlwFullscreen
+          turnsRemaining={ulwTurnsRemaining ?? null}
+          ui={ui}
+          goal={ulwGoal}
+          direction={ulwDirection}
+          onGoalSave={onUlwGoalSave ?? (() => {})}
+          onDirectionSave={onUlwDirectionSave ?? (() => {})}
+          onStop={handleUlwStop}
+          onCollapse={() => setUlwFullscreen(false)}
+        />
+      )}
+    </div>
+  )
+}
