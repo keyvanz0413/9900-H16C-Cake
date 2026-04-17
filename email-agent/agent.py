@@ -9,6 +9,14 @@ import os
 from connectonion import Agent, Memory, WebFetch, Shell, TodoList
 from connectonion.useful_plugins import re_act, gmail_plugin, calendar_plugin
 
+MODEL_NAME = os.getenv("AGENT_MODEL", "co/claude-sonnet-4-5")
+
+
+class OpenAICompatibleGmailMixin:
+    """Patch ConnectOnion's bare `list` annotation for OpenAI tool schemas."""
+
+    def bulk_update_contacts(self, updates: list[dict]) -> str:
+        return super().bulk_update_contacts(updates)
 
 # Create shared tool instances
 memory = Memory(memory_file="data/memory.md")
@@ -27,7 +35,11 @@ plugins = [re_act]
 # Prefer Gmail if both are linked (can only use one due to method name conflicts)
 if has_gmail:
     from connectonion import Gmail, GoogleCalendar
-    tools.append(Gmail())
+
+    class GmailCompat(OpenAICompatibleGmailMixin, Gmail):
+        pass
+
+    tools.append(GmailCompat())
     tools.append(GoogleCalendar())
     plugins.append(gmail_plugin)
     plugins.append(calendar_plugin)
@@ -54,7 +66,7 @@ init_crm = Agent(
     system_prompt="prompts/crm_init.md",
     tools=tools + [memory, web],
     max_iterations=30,
-    model="co/claude-sonnet-4-5",
+    model=MODEL_NAME,
     log=False  # Don't create separate log file
 )
 
@@ -89,7 +101,7 @@ agent = Agent(
     tools=tools,
     plugins=plugins,
     max_iterations=15,
-    model="co/claude-sonnet-4-5",
+    model=MODEL_NAME,
 )
 
 # Example usage

@@ -233,7 +233,10 @@ export function useAgentSDK(options: UseAgentSDKOptions): UseAgentSDKReturn {
   // Send message
   const send = useCallback((content: string, images?: string[], files?: import('./types').FileAttachment[]) => {
     startTimeRef.current = Date.now() // Start timer
-    input(content, { images, files })
+    if (files?.length) {
+      console.warn('File attachments are not supported by the current connectonion SDK version.')
+    }
+    input(content, images ? { images } : {})
   }, [input])
 
   const respondToAskUser = useCallback((answer: string | string[]) => {

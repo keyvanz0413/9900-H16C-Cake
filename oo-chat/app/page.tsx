@@ -1,14 +1,139 @@
 'use client'
 
-import { useState } from 'react'
+import { useCallback, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { HiOutlinePlus, HiOutlineStatusOnline, HiOutlineStatusOffline } from 'react-icons/hi'
+import { HiOutlineInbox, HiOutlinePlus, HiOutlineServer, HiOutlineStatusOnline, HiOutlineStatusOffline } from 'react-icons/hi'
+import { Chat, type UI } from '@/components/chat'
 import { ChatLayout } from '@/components/chat-layout'
 import { useChatStore } from '@/store/chat-store'
 import { useIdentity } from '@/hooks/use-identity'
 import { useAgentInfo, shortAddress } from '@/hooks/use-agent-info'
 
+const USE_DEFAULT_AGENT = process.env.NEXT_PUBLIC_USE_DEFAULT_AGENT === 'true'
+const DEFAULT_AGENT_NAME = process.env.NEXT_PUBLIC_DEFAULT_AGENT_NAME || 'Email Agent'
+
+interface DirectChatMessage {
+  id: string
+  role: 'user' | 'assistant'
+  content: string
+}
+
 export default function Home() {
+  if (USE_DEFAULT_AGENT) {
+    return <DefaultAgentHome />
+  }
+
+  return <AddressBookHome />
+}
+
+function DefaultAgentHome() {
+  const [ui, setUI] = useState<UI[]>([])
+  const [messages, setMessages] = useState<DirectChatMessage[]>([])
+  const [agentSession, setAgentSession] = useState<unknown>(null)
+  const [isLoading, setIsLoading] = useState(false)
+  const [connectionError, setConnectionError] = useState<string | null>(null)
+  const [lastUserMessage, setLastUserMessage] = useState('')
+
+  const requestAgentReply = useCallback(async (content: string, history: DirectChatMessage[], session: unknown) => {
+    setIsLoading(true)
+    setConnectionError(null)
+
+    try {
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: content,
+          messages: history,
+          agentSession: session,
+          useDefaultAgent: true,
+        }),
+      })
+
+      const data = await response.json() as { response?: string; error?: string; session?: unknown }
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to reach the email agent.')
+      }
+
+      const replyText = data.response || ''
+      const assistantMessage: DirectChatMessage = {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        content: replyText,
+      }
+
+      setMessages(prev => [...prev, assistantMessage])
+      setUI(prev => [...prev, { id: assistantMessage.id, type: 'agent', content: replyText }])
+      setAgentSession(data.session ?? null)
+    } catch (error) {
+      setConnectionError(error instanceof Error ? error.message : 'Failed to reach the email agent.')
+    } finally {
+      setIsLoading(false)
+    }
+  }, [])
+
+  const handleSend = useCallback(async (content: string) => {
+    const userMessage: DirectChatMessage = {
+      id: crypto.randomUUID(),
+      role: 'user',
+      content,
+    }
+    const nextHistory = [...messages, userMessage]
+
+    setLastUserMessage(content)
+    setMessages(nextHistory)
+    setUI(prev => [...prev, { id: userMessage.id, type: 'user', content }])
+
+    await requestAgentReply(content, nextHistory, agentSession)
+  }, [agentSession, messages, requestAgentReply])
+
+  const handleRetry = useCallback(async () => {
+    if (!lastUserMessage) return
+    await requestAgentReply(lastUserMessage, messages, agentSession)
+  }, [agentSession, lastUserMessage, messages, requestAgentReply])
+
+  const sessionState = isLoading ? 'active' : ui.length > 0 ? 'connected' : 'idle'
+
+  return (
+    <ChatLayout>
+      <div className="flex flex-1 flex-col min-h-0 bg-white">
+        <div className="border-b border-neutral-200 px-6 py-5">
+          <div className="mx-auto flex max-w-3xl items-start gap-4">
+            <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-neutral-900 text-white">
+              <HiOutlineInbox className="h-6 w-6" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                <h1 className="text-lg font-semibold text-neutral-900">{DEFAULT_AGENT_NAME}</h1>
+                <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700">
+                  <HiOutlineServer className="h-3.5 w-3.5" />
+                  Docker local mode
+                </span>
+              </div>
+              <p className="mt-1 text-sm text-neutral-500">
+                Open the page and chat directly with the bundled email agent. No relay or pasted address needed.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div className="min-h-0 flex-1">
+          <Chat
+            ui={ui}
+            onSend={handleSend}
+            isLoading={isLoading}
+            placeholder="Ask your email agent about inbox, replies, meetings, or CRM..."
+            sessionState={sessionState}
+            connectionError={connectionError || undefined}
+            onRetry={connectionError && lastUserMessage ? handleRetry : undefined}
+          />
+        </div>
+      </div>
+    </ChatLayout>
+  )
+}
+
+function AddressBookHome() {
   const router = useRouter()
   const { agents, addAgent } = useChatStore()
   const infoMap = useAgentInfo(agents)

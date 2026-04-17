@@ -1,0 +1,31 @@
+services:
+  email-agent:
+    build:
+      context: ./email-agent
+    container_name: email-agent
+    env_file:
+      - path: ./email-agent/.env
+        required: false
+    environment:
+      HOME: /app
+      EMAIL_AGENT_TRUST: open
+    restart: unless-stopped
+    volumes:
+      - ./email-agent/.env:/app/.env
+      - ./email-agent/.co:/app/.co
+      - ./email-agent/data:/app/data
+
+  oo-chat:
+    build:
+      context: ./oo-chat
+      args:
+        NEXT_PUBLIC_USE_DEFAULT_AGENT: "true"
+        NEXT_PUBLIC_DEFAULT_AGENT_NAME: "Email Agent"
+    container_name: oo-chat
+    depends_on:
+      - email-agent
+    environment:
+      DEFAULT_AGENT_URL: http://email-agent:8000
+    ports:
+      - "${OO_CHAT_PORT:-3300}:3000"
+    restart: unless-stopped

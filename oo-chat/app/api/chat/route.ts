@@ -59,7 +59,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server'
-import { createLLM, connect, address } from 'connectonion'
+import { createLLM, address } from 'connectonion'
 import { join } from 'path'
 
 interface ChatMessage {
@@ -91,31 +91,43 @@ function getServerKeys() {
 }
 
 export async function POST(request: NextRequest) {
-  const { message, messages, apiKey, model, agentUrl, agentSession } = await request.json()
+  const {
+    message,
+    messages,
+    apiKey,
+    model,
+    agentUrl,
+    agentSession,
+    useDefaultAgent,
+  } = await request.json()
 
-  // If agentUrl is provided, connect to remote agent with signing
-  if (agentUrl) {
+  const resolvedAgentUrl = agentUrl || (
+    useDefaultAgent
+      ? (process.env.DEFAULT_AGENT_URL || process.env.NEXT_PUBLIC_DEFAULT_AGENT_URL || '')
+      : ''
+  )
+
+  // If an agent URL is provided, connect to the agent with signed requests
+  if (resolvedAgentUrl) {
     const keys = getServerKeys()
 
     // Extract agent address from URL
     // URL pattern: https://{name}-{short_address}.agents.openonion.ai
-    const addressMatch = agentUrl.match(/-(0x[a-f0-9]+)\./i)
+    const addressMatch = resolvedAgentUrl.match(/-(0x[a-f0-9]+)\./i)
     let agentAddress = addressMatch ? addressMatch[1] : ''
 
-    // If we have a short address, fetch the full address from /info
-    if (agentAddress && agentAddress.length < 66) {
-      const infoResponse = await fetch(`${agentUrl}/info`)
+    // For local URLs there may be no address in the hostname, so always fall back to /info.
+    if (!agentAddress || agentAddress.length < 66) {
+      const infoResponse = await fetch(`${resolvedAgentUrl}/info`)
       if (infoResponse.ok) {
         const info = await infoResponse.json() as { address?: string }
         agentAddress = info.address || ''
-      } else {
-        agentAddress = ''
       }
     }
 
     // Direct HTTP with session support for multi-turn conversations
     const body = createSignedBody(keys, message, agentAddress || '0x', agentSession)
-    const response = await fetch(`${agentUrl}/input`, {
+    const response = await fetch(`${resolvedAgentUrl}/input`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -177,13 +189,7 @@ function createSignedBody(
     timestamp: Math.floor(Date.now() / 1000),
   }
 
-  // Canonical JSON with sorted keys
-  const sortedKeys = Object.keys(payload).sort()
-  const sortedPayload: Record<string, unknown> = {}
-  for (const key of sortedKeys) {
-    sortedPayload[key] = payload[key as keyof typeof payload]
-  }
-  const canonicalMessage = JSON.stringify(sortedPayload)
+  const canonicalMessage = canonicalJSONString(payload)
 
   const signature = address.sign(keys, canonicalMessage)
 
@@ -199,4 +205,22 @@ function createSignedBody(
   }
 
   return body
+}
+
+function canonicalJSONString(payload: Record<string, unknown>): string {
+  const sortedKeys = Object.keys(payload).sort()
+  const sortedPayload: Record<string, unknown> = {}
+  for (const key of sortedKeys) {
+    sortedPayload[key] = payload[key]
+  }
+
+  // Match Python json.dumps(..., sort_keys=True, separators=(",", ":"))
+  // including ensure_ascii=True so non-ASCII prompts verify correctly.
+  return JSON.stringify(sortedPayload).replace(/[^\u0000-\u007f]/g, (char) => {
+    let escaped = ''
+    for (let index = 0; index < char.length; index += 1) {
+      escaped += `\\u${char.charCodeAt(index).toString(16).padStart(4, '0')}`
+    }
+    return escaped
+  })
 }

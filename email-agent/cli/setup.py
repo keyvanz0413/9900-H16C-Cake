@@ -27,10 +27,43 @@ def check_setup(skip_init: bool = False) -> bool:
     has_google_token = os.getenv('GOOGLE_ACCESS_TOKEN')
 
     if not has_llm_key or not has_google_token:
+        if not has_llm_key and not has_google_token:
+            title = "LLM + Google Auth Required"
+            body = (
+                "You need an LLM provider key and Google auth before using the email agent.\n"
+                "This will open a browser to grant Gmail permissions."
+            )
+            manual_steps = (
+                "1. Set one LLM key in `.env` ([cyan]OPENAI_API_KEY[/cyan], [cyan]ANTHROPIC_API_KEY[/cyan], "
+                "[cyan]GEMINI_API_KEY[/cyan], or [cyan]OPENONION_API_KEY[/cyan]) [dim]or run `co auth` for OpenOnion[/dim]\n"
+                "2. [cyan]co auth google[/cyan]   (authenticate Google Gmail)\n\n"
+                "Then restart this CLI."
+            )
+        elif not has_llm_key:
+            title = "LLM Auth Required"
+            body = (
+                "You need an LLM provider key before using the email agent.\n"
+                "You can use your own provider key in `.env` or run `co auth` for OpenOnion."
+            )
+            manual_steps = (
+                "1. Set one LLM key in `.env` ([cyan]OPENAI_API_KEY[/cyan], [cyan]ANTHROPIC_API_KEY[/cyan], "
+                "[cyan]GEMINI_API_KEY[/cyan], or [cyan]OPENONION_API_KEY[/cyan])\n"
+                "2. Optional: [cyan]co auth[/cyan] if you want to use [cyan]co/*[/cyan] models\n\n"
+                "Then restart this CLI."
+            )
+        else:
+            title = "Google Auth Required"
+            body = (
+                "You already have an LLM key.\n"
+                "You only need to authenticate with Google to grant Gmail permissions."
+            )
+            manual_steps = (
+                "1. [cyan]co auth google[/cyan]   (authenticate Google Gmail)\n\n"
+                "Then restart this CLI."
+            )
+
         console.print(Panel(
-            "[bold red]Google Auth Required[/bold red]\n\n"
-            "You need to authenticate with Google first.\n"
-            "This will open a browser to grant Gmail permissions.",
+            f"[bold red]{title}[/bold red]\n\n{body}",
             title="[bold]Setup Required[/bold]",
             border_style="red",
             padding=(1, 2)
@@ -53,9 +86,7 @@ def check_setup(skip_init: bool = False) -> bool:
             console.print(Panel(
                 "[bold yellow]Manual Setup Required[/bold yellow]\n\n"
                 "[bold]Please run these commands:[/bold]\n\n"
-                "1. [cyan]co auth[/cyan]          (authenticate LLM provider)\n"
-                "2. [cyan]co auth google[/cyan]   (authenticate Google Gmail)\n\n"
-                "Then restart this CLI.",
+                f"{manual_steps}",
                 border_style="yellow",
                 padding=(1, 2)
             ))
