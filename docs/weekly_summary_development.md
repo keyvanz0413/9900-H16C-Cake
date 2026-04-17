@@ -26,31 +26,7 @@ For Weekly Summary, the goal is:
 > important themes, unread or urgent messages, meeting-related activity,
 > follow-up status, and calendar context, then return a concise summary.
 
-## 2. Current Implementation Status
-
-Weekly Summary is currently usable through the existing agent flow.
-
-When the user asks for a weekly summary, the agent can already:
-
-- search recent Gmail messages, usually with a query such as `newer_than:7d`
-- summarize recent email activity
-- identify common categories such as security alerts, meetings, applications,
-  and promotional emails
-- mention unread messages
-- detect some meeting-related conversations
-- call follow-up or unanswered email tools when needed
-- call calendar tools when needed
-- reformat the answer into a bullet-point report or executive summary
-
-The feature is therefore strongly supported from a user experience point of
-view.
-
-However, the current implementation is mostly prompt-driven. The agent composes
-existing low-level tools at runtime instead of calling one dedicated Weekly
-Summary tool. This means the feature can work well in demos, but the internal
-workflow is not yet fully stable or easy to test.
-
-## 3. Current Limitations
+## 2. Design Constraints
 
 The current Weekly Summary behavior has several limitations:
 
@@ -72,7 +48,7 @@ The most important boundary:
 > an email conversation, the agent should say the meeting appears confirmed in
 > the email thread.
 
-## 4. Desired Design Direction
+## 3. Desired Design Direction
 
 Weekly Summary should be implemented as a read-only aggregation workflow.
 
@@ -101,7 +77,7 @@ styles, such as:
 - urgent-only summary
 - meeting-only summary
 
-## 5. Proposed Tool
+## 4. Proposed Tool
 
 ### Tool Name
 
@@ -150,7 +126,7 @@ The tool should:
 10. Optionally call calendar lookup for upcoming events.
 11. Return structured data to the agent.
 
-## 6. Proposed Output Schema
+## 5. Proposed Output Schema
 
 The tool can return JSON as a string, or a clearly structured text block. JSON is
 preferred because it is easier for the agent to consume consistently.
@@ -215,7 +191,7 @@ Example:
 }
 ```
 
-## 7. Category Logic
+## 6. Category Logic
 
 The first version can use simple rule-based grouping before asking the LLM to
 format the result.
@@ -234,7 +210,7 @@ Recommended categories:
 The category logic does not need to be perfect at first. It should provide a
 stable first pass that the LLM can refine.
 
-## 8. Meeting Status Logic
+## 7. Meeting Status Logic
 
 Meeting-related summary needs careful wording.
 
@@ -270,7 +246,7 @@ This meeting is booked.
 
 unless the calendar confirms it.
 
-## 9. Agent Prompt Guidance
+## 8. Agent Prompt Guidance
 
 The Gmail agent prompt should eventually include a small workflow section:
 
@@ -293,7 +269,7 @@ activity:
 This keeps the agent behavior stable while still allowing flexible natural
 language formatting.
 
-## 10. Integration Points
+## 9. Integration Points
 
 The current backend agent is assembled in:
 
@@ -343,7 +319,7 @@ Recommended direction:
 > as resume review, bug review, and unsubscribe. Use Option A only for a quick
 > prototype.
 
-## 11. Testing Plan
+## 10. Testing Plan
 
 Weekly Summary should be tested at two levels.
 
@@ -382,23 +358,7 @@ Expected behavior:
 - answer does not invent calendar bookings
 - follow-up formatting requests reuse the same facts
 
-## 12. Current Status Rating
-
-| Area | Rating | Notes |
-| --- | --- | --- |
-| User-facing usefulness | Strong | Web test results are good. |
-| Tooling maturity | Medium | Uses existing tools, but no dedicated weekly tool yet. |
-| Stability | Medium | Prompt-driven tool selection may vary. |
-| Testability | Low to medium | Needs a structured tool or mocked service for easier tests. |
-| Safety | Strong | Read-only feature; low risk. |
-
-Overall status:
-
-```text
-Strongly supported, but not yet fully productized as a dedicated workflow.
-```
-
-## 13. Recommended Next Step
+## 11. Recommended Next Step
 
 The recommended next step is to add a read-only aggregation tool:
 
