@@ -46,6 +46,8 @@ htmlcov/
 
 # Data
 data/
+USER_PROFILE.md
+USER_HABITS.md
 
 # Temporary files
 *.log

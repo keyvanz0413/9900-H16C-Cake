@@ -6,10 +6,40 @@ Pattern: Use ConnectOnion email tools + Memory system + Calendar + Shell + Plugi
 """
 
 import os
+from pathlib import Path
+
 from connectonion import Agent, Memory, WebFetch, Shell, TodoList
 from connectonion.useful_plugins import re_act, gmail_plugin, calendar_plugin
+from intent_layer import (
+    IntentLayerOrchestrator,
+    MarkdownMemoryStore,
+    RestrictedSkillExecutor,
+    build_tool_function_map,
+)
+
+
+def _get_int_env(name: str, default: int) -> int:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    try:
+        return int(raw_value)
+    except ValueError:
+        return default
 
 MODEL_NAME = os.getenv("AGENT_MODEL", "co/claude-sonnet-4-5")
+INTENT_MODEL_NAME = os.getenv("INTENT_LAYER_MODEL", MODEL_NAME)
+SKILL_SELECTOR_MODEL_NAME = os.getenv("SKILL_SELECTOR_MODEL", INTENT_MODEL_NAME)
+SKILL_EXECUTOR_MODEL_NAME = os.getenv("SKILL_EXECUTOR_MODEL", MODEL_NAME)
+USER_MEMORY_MODEL_NAME = os.getenv("USER_MEMORY_MODEL", INTENT_MODEL_NAME)
+SKILL_EXECUTOR_MAX_ITERATIONS = _get_int_env("SKILL_EXECUTOR_MAX_ITERATIONS", 8)
+
+BASE_DIR = Path(__file__).resolve().parent
+PROMPTS_DIR = BASE_DIR / "prompts"
+SKILL_REGISTRY_PATH = BASE_DIR / "skills" / "registry.yaml"
+USER_PROFILE_PATH = BASE_DIR / "USER_PROFILE.md"
+USER_HABITS_PATH = BASE_DIR / "USER_HABITS.md"
+SKILL_EXECUTOR_PROMPT_PATH = PROMPTS_DIR / "skill_executor.md"
 
 
 class OpenAICompatibleGmailMixin:
@@ -54,16 +84,16 @@ if not tools:
 
 # Select prompt based on linked provider
 if has_gmail:
-    system_prompt = "prompts/gmail_agent.md"
+    system_prompt = PROMPTS_DIR / "gmail_agent.md"
 elif has_outlook:
-    system_prompt = "prompts/outlook_agent.md"
+    system_prompt = PROMPTS_DIR / "outlook_agent.md"
 else:
-    system_prompt = "prompts/gmail_agent.md"  # Default
+    system_prompt = PROMPTS_DIR / "gmail_agent.md"  # Default
 
 # Create init sub-agent for CRM database setup
 init_crm = Agent(
     name="crm-init",
-    system_prompt="prompts/crm_init.md",
+    system_prompt=PROMPTS_DIR / "crm_init.md",
     tools=tools + [memory, web],
     max_iterations=30,
     model=MODEL_NAME,
@@ -94,14 +124,62 @@ def init_crm_database(max_emails: int = 500, top_n: int = 10, exclude_domains: s
 # Add remaining tools to the list
 tools.extend([memory, shell, todo, init_crm_database])
 
-# Create main agent
-agent = Agent(
+# Create main execution agent
+main_agent = Agent(
     name="email-agent",
     system_prompt=system_prompt,
     tools=tools,
     plugins=plugins,
     max_iterations=15,
     model=MODEL_NAME,
+)
+
+# Intent and routing helper agents are lightweight single-step LLM calls.
+intent_agent = Agent(
+    name="email-agent-intent-layer",
+    system_prompt=PROMPTS_DIR / "intent_layer.md",
+    tools=[],
+    max_iterations=1,
+    model=INTENT_MODEL_NAME,
+)
+
+skill_selector_agent = Agent(
+    name="email-agent-skills-selector",
+    system_prompt=PROMPTS_DIR / "skills_selector.md",
+    tools=[],
+    max_iterations=1,
+    model=SKILL_SELECTOR_MODEL_NAME,
+)
+
+user_memory_writer_agent = Agent(
+    name="email-agent-user-memory-writer",
+    system_prompt=PROMPTS_DIR / "user_memory_writer.md",
+    tools=[],
+    max_iterations=1,
+    model=USER_MEMORY_MODEL_NAME,
+)
+
+memory_store = MarkdownMemoryStore(
+    profile_path=USER_PROFILE_PATH,
+    habits_path=USER_HABITS_PATH,
+    writer_agent=user_memory_writer_agent,
+)
+
+skill_executor = RestrictedSkillExecutor(
+    agent_factory=Agent,
+    system_prompt=SKILL_EXECUTOR_PROMPT_PATH,
+    tool_function_map=build_tool_function_map(tools),
+    model=SKILL_EXECUTOR_MODEL_NAME,
+    default_max_iterations=SKILL_EXECUTOR_MAX_ITERATIONS,
+)
+
+agent = IntentLayerOrchestrator(
+    main_agent=main_agent,
+    intent_agent=intent_agent,
+    skill_selector_agent=skill_selector_agent,
+    skill_executor=skill_executor,
+    memory_store=memory_store,
+    skill_registry_path=SKILL_REGISTRY_PATH,
 )
 
 # Example usage
