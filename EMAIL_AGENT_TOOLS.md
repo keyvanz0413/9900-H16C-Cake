@@ -4,7 +4,7 @@
 
 - 当前模式：Gmail + Google Calendar + Memory + Shell + Todo + CRM 子流程
 - 当前模型：`gpt-5.4`
-- 当前工具数量：`50`
+- 当前工具数量：`51`
 - 说明依据：运行中的 `email-agent` 工具注册表，而不是手工猜测
 
 如果后面把 `.env` 切到 Outlook 模式，这份清单会变化。
@@ -64,6 +64,12 @@
 - 中文说明：列出某封邮件的附件。
 - 主要作用：确认邮件有没有附件、附件叫什么。
 - 常用参数：`email_id`
+
+### `extract_recent_attachment_texts`
+- 中文说明：抽取最近几天内带附件邮件的附件文本内容。
+- 主要作用：把最近 inbox 中 PDF / DOCX / TXT / HTML 这类附件转成可读文本，供简历、合同、账单等后续 skill 使用。
+- 常用参数：`days`, `max_results`
+- 说明：当前是 Gmail 专用；内部固定查询 `in:inbox newer_than:{days}d has:attachment`
 
 ### `get_email_body`
 - 中文说明：读取邮件完整正文。

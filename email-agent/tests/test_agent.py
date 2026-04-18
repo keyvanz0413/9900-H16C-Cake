@@ -39,6 +39,7 @@ def test_agent_has_email_tools_when_gmail_linked():
     assert "search_emails" in tool_names
     assert "send" in tool_names
     assert "mark_read" in tool_names
+    assert "extract_recent_attachment_texts" in tool_names
 
 
 def test_agent_no_email_tools_when_not_linked():

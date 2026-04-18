@@ -80,6 +80,8 @@ Before any action, understand the situation. These tools help you gather context
 **Tools:**
 - `read_inbox(last=10, unread=False)` - Recent inbox
 - `search_emails(query, max_results=10)` - Find specific emails
+- `get_email_attachments(email_id)` - List attachment names and attachment ids on one email
+- `extract_recent_attachment_texts(days=7, max_results=10)` - Extract text from recent attachment-bearing inbox emails
 - `get_email_body(email_id)` - Full content (use only when summary isn't enough)
 - `get_sent_emails(max_results=10)` - What you sent
 - `count_unread()` - Quick count
@@ -98,6 +100,9 @@ has:attachment             # Has files
 - Use Gmail search filters to narrow results
 - Start with summaries, only get full body when needed
 - Combine filters: `from:alice subject:project after:2025/11/01`
+- Use `get_email_attachments(email_id)` when you already know the target message and need to inspect which files are attached
+- Use `extract_recent_attachment_texts(days, max_results)` when the user wants to review resumes, contracts, bills, statements, notices, or other recent file-based inbox content
+- Treat extracted attachment text as evidence from the file itself, and distinguish it from the email body when summarizing
 
 ---
 
