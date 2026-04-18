@@ -57,3 +57,30 @@ skills:
         default: 7
         description: Number of recent days to inspect for urgent, attention-needed, or high-priority emails, capped at 7.
     output: A user-facing triage of recent inbox emails that look urgent, need attention, or appear high-priority, grounded only in keyword search hits, unanswered-thread context, and the fetched full bodies of matched urgent and unresolved unanswered emails.
+  - name: draft_reply_from_email_context
+    description: Locate a target email either by unanswered-message rank or by a mailbox search query, then fetch the target email body so the outer layer can draft a reply.
+    scope: Draft-only reply workflow. Never send email and never modify mailbox state.
+    used_tools:
+      - search_emails
+      - get_unanswered_emails
+      - get_email_body
+    input_schema:
+      selection_mode:
+        type: string
+        required: true
+        description: How to locate the target email. Use unanswered_rank for "latest/second unanswered email" requests, or search_query for requests anchored by a person, topic, subject, or other mailbox clue.
+      target_rank:
+        type: int
+        required: false
+        default: 1
+        description: 1-based rank used only when selection_mode is unanswered_rank. 1 means the latest unanswered email, 2 means the second latest unanswered email, and so on.
+      query:
+        type: string
+        required: false
+        description: Mailbox search fragment used only when selection_mode is search_query, for example from:alice@example.com OR to:alice@example.com, subject:"deadline", or security alert.
+      days:
+        type: int
+        required: false
+        default: 30
+        description: Search lookback window used only when selection_mode is search_query, capped at 30.
+    output: A user-facing reply draft grounded only in the located target email, the associated mailbox search results, and the fetched full email body.

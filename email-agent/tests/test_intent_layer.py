@@ -173,6 +173,66 @@ class UrgentEmailToolBox:
         return f"Email body for {email_id}"
 
 
+class DraftReplyToolBox:
+    def __init__(self):
+        self.calls: list[tuple[str, dict[str, object]]] = []
+        self._lock = threading.Lock()
+
+    def _record(self, tool_name: str, **kwargs: object) -> None:
+        with self._lock:
+            self.calls.append((tool_name, kwargs))
+
+    def search_emails(self, query: str, max_results: int = 10) -> str:
+        self._record("search_emails", query=query, max_results=max_results)
+        if "from:brenda@example.com" in query:
+            return (
+                "Found 1 email(s):\n\n"
+                "1. [UNREAD] From: Brenda <brenda@example.com>\n"
+                "   Subject: Re: Coffee chat next week\n"
+                "   Date: Fri, 18 Apr 2026 08:00:00 +0000\n"
+                "   Preview: Tuesday afternoon works for me...\n"
+                "   ID: reply-unanswered-002\n"
+            )
+        return (
+            "Found 2 email(s):\n\n"
+            "1. [UNREAD] From: Zenglin <zenglin0813@gmail.com>\n"
+            "   Subject: Re: Coffee Chat Tomorrow at 3 PM\n"
+            "   Date: Fri, 18 Apr 2026 09:10:00 +0000\n"
+            "   Preview: Tomorrow at 3 pm works well for me...\n"
+            "   ID: reply-search-001\n\n"
+            "2. [UNREAD] From: Zenglin <zenglin0813@gmail.com>\n"
+            "   Subject: Next week\n"
+            "   Date: Thu, 17 Apr 2026 09:10:00 +0000\n"
+            "   Preview: I am also free next Tuesday...\n"
+            "   ID: reply-search-002\n"
+        )
+
+    def get_unanswered_emails(self, within_days: int = 120, max_results: int = 20) -> str:
+        self._record("get_unanswered_emails", within_days=within_days, max_results=max_results)
+        return (
+            f"Found 2 unanswered email(s) from the last {within_days} days:\n\n"
+            "1. From: Alice <alice@example.com>\n"
+            "   Subject: Budget review follow-up\n"
+            "   Age: 2 days (2 messages in thread)\n"
+            "   Thread ID: thread-001\n\n"
+            "2. From: Brenda <brenda@example.com>\n"
+            "   Subject: Re: Coffee chat next week\n"
+            "   Age: 1 days (3 messages in thread)\n"
+            "   Thread ID: thread-002\n"
+        )
+
+    def get_email_body(self, email_id: str) -> str:
+        self._record("get_email_body", email_id=email_id)
+        return (
+            f"From: sender@example.com\n"
+            f"To: ssswindy2@gmail.com\n"
+            f"Subject: Subject for {email_id}\n"
+            f"Date: Fri, 18 Apr 2026 09:10:00 +0000\n"
+            "\n--- Email Body ---\n\n"
+            f"Full body for {email_id}"
+        )
+
+
 def make_noop_skill_finalizer() -> FakeAgent:
     return FakeAgent(['{"final_response":"should not be used","reason":"noop"}'], name="skill-finalizer")
 
@@ -1348,6 +1408,205 @@ def test_urgent_email_triage_skill_uses_fixed_workflow(repo_root: Path | None = 
     assert toolbox.calls[6:] == [
         ("get_email_body", {"email_id": "unanswered-001"}),
     ]
+
+
+def test_draft_reply_from_email_context_uses_unanswered_rank_workflow(repo_root: Path | None = None):
+    del repo_root
+    toolbox = DraftReplyToolBox()
+    tool_function_map = build_tool_function_map([toolbox])
+    skills_directory = Path(__file__).resolve().parent.parent / "skills"
+    writing_style_path = skills_directory.parent / "test_tmp_writing_style_unanswered.md"
+    writing_style_path.write_text(
+        "# Writing Style\n\n- Keep replies concise, warm, and direct.\n- Prefer short confirmations and friendly closings.\n",
+        encoding="utf-8",
+    )
+
+    try:
+        executor = PythonSkillExecutor(
+            skills_directory=skills_directory,
+            tool_function_map=tool_function_map,
+            skill_runtime={
+                "paths": {
+                    "writing_style_markdown": writing_style_path,
+                },
+            },
+        )
+
+        result = executor.run(
+            SkillSpec(
+                name="draft_reply_from_email_context",
+                description="Locate a target email either by unanswered-message rank or by a mailbox search query, then fetch the target email body so the outer layer can draft a reply.",
+                scope="Draft-only reply workflow. Never send email and never modify mailbox state.",
+                used_tools=("search_emails", "get_unanswered_emails", "get_email_body"),
+                output="A user-facing reply draft grounded only in the located target email, the associated mailbox search results, and the fetched full email body.",
+                input_schema=(
+                    SkillInputFieldSpec(
+                        name="selection_mode",
+                        field_type="string",
+                        required=True,
+                        description="Use unanswered_rank or search_query.",
+                    ),
+                    SkillInputFieldSpec(
+                        name="target_rank",
+                        field_type="int",
+                        required=False,
+                        description="1-based unanswered-email rank.",
+                        has_default=True,
+                        default=1,
+                    ),
+                    SkillInputFieldSpec(
+                        name="query",
+                        field_type="string",
+                        required=False,
+                        description="Mailbox search fragment used only when selection_mode is search_query.",
+                    ),
+                    SkillInputFieldSpec(
+                        name="days",
+                        field_type="int",
+                        required=False,
+                        description="Search lookback window for search_query mode.",
+                        has_default=True,
+                        default=30,
+                    ),
+                ),
+            ),
+            skill_arguments={"selection_mode": "unanswered_rank", "target_rank": 2},
+            current_message="帮我对倒数第二条没回复的消息起草",
+            intent_decision=type(
+                "IntentDecisionLike",
+                (),
+                {"intent": "用户想让我对第二条最近未回复的邮件起草回复。"},
+            )(),
+            recent_context=[],
+        )
+    finally:
+        if writing_style_path.exists():
+            writing_style_path.unlink()
+
+    assert result.completed is True
+    assert "[DRAFT_REPLY_FROM_EMAIL_CONTEXT_BUNDLE]" in result.response
+    assert "[WRITING_STYLE]" in result.response
+    assert "Keep replies concise, warm, and direct." in result.response
+    assert "selection_mode: unanswered_rank" in result.response
+    assert "target_email_id: reply-unanswered-002" in result.response
+    assert "[UNANSWERED_RESULTS]" in result.response
+    assert "[SELECTED_UNANSWERED_ENTRY]" in result.response
+    assert "from: Brenda <brenda@example.com>" in result.response
+    assert "[UNANSWERED_LOOKUP_SEARCH]" in result.response
+    assert "[TARGET_EMAIL_BODY]" in result.response
+    assert "Full body for reply-unanswered-002" in result.response
+
+    assert toolbox.calls[0] == ("get_unanswered_emails", {"within_days": 7, "max_results": 30})
+    assert toolbox.calls[1] == (
+        "search_emails",
+        {
+            "query": 'in:inbox newer_than:7d from:brenda@example.com subject:"Re: Coffee chat next week"',
+            "max_results": 1,
+        },
+    )
+    assert toolbox.calls[2] == ("get_email_body", {"email_id": "reply-unanswered-002"})
+    assert len(toolbox.calls) == 3
+
+
+def test_draft_reply_from_email_context_uses_search_query_workflow(repo_root: Path | None = None):
+    del repo_root
+    toolbox = DraftReplyToolBox()
+    tool_function_map = build_tool_function_map([toolbox])
+    skills_directory = Path(__file__).resolve().parent.parent / "skills"
+    writing_style_path = skills_directory.parent / "test_tmp_writing_style_search.md"
+    writing_style_path.write_text(
+        "# Writing Style\n\n- Use upbeat greetings.\n- Close with a confident next-step sentence.\n",
+        encoding="utf-8",
+    )
+
+    try:
+        executor = PythonSkillExecutor(
+            skills_directory=skills_directory,
+            tool_function_map=tool_function_map,
+            skill_runtime={
+                "paths": {
+                    "writing_style_markdown": writing_style_path,
+                },
+            },
+        )
+
+        result = executor.run(
+            SkillSpec(
+                name="draft_reply_from_email_context",
+                description="Locate a target email either by unanswered-message rank or by a mailbox search query, then fetch the target email body so the outer layer can draft a reply.",
+                scope="Draft-only reply workflow. Never send email and never modify mailbox state.",
+                used_tools=("search_emails", "get_unanswered_emails", "get_email_body"),
+                output="A user-facing reply draft grounded only in the located target email, the associated mailbox search results, and the fetched full email body.",
+                input_schema=(
+                    SkillInputFieldSpec(
+                        name="selection_mode",
+                        field_type="string",
+                        required=True,
+                        description="Use unanswered_rank or search_query.",
+                    ),
+                    SkillInputFieldSpec(
+                        name="target_rank",
+                        field_type="int",
+                        required=False,
+                        description="1-based unanswered-email rank.",
+                        has_default=True,
+                        default=1,
+                    ),
+                    SkillInputFieldSpec(
+                        name="query",
+                        field_type="string",
+                        required=False,
+                        description="Mailbox search fragment used only when selection_mode is search_query.",
+                    ),
+                    SkillInputFieldSpec(
+                        name="days",
+                        field_type="int",
+                        required=False,
+                        description="Search lookback window for search_query mode.",
+                        has_default=True,
+                        default=30,
+                    ),
+                ),
+            ),
+            skill_arguments={
+                "selection_mode": "search_query",
+                "query": "from:zenglin0813@gmail.com OR to:zenglin0813@gmail.com",
+                "days": 14,
+            },
+            current_message="给 zenglin 那封起草回复",
+            intent_decision=type(
+                "IntentDecisionLike",
+                (),
+                {"intent": "用户想让我根据与 Zenglin 的邮件上下文起草回复。"},
+            )(),
+            recent_context=[],
+        )
+    finally:
+        if writing_style_path.exists():
+            writing_style_path.unlink()
+
+    assert result.completed is True
+    assert "[WRITING_STYLE]" in result.response
+    assert "Use upbeat greetings." in result.response
+    assert "selection_mode: search_query" in result.response
+    assert "target_email_id: reply-search-001" in result.response
+    assert "[SEARCH_RESULTS]" in result.response
+    assert "[SEARCH_MATCHED_EMAIL_IDS]" in result.response
+    assert "reply-search-001, reply-search-002" in result.response
+    assert "[TARGET_EMAIL_BODY]" in result.response
+    assert "Full body for reply-search-001" in result.response
+    assert "[UNANSWERED_RESULTS]" in result.response
+    assert "(not run)" in result.response
+
+    assert toolbox.calls[0] == (
+        "search_emails",
+        {
+            "query": "in:inbox newer_than:14d (from:zenglin0813@gmail.com OR to:zenglin0813@gmail.com)",
+            "max_results": 20,
+        },
+    )
+    assert toolbox.calls[1] == ("get_email_body", {"email_id": "reply-search-001"})
+    assert len(toolbox.calls) == 2
 
 
 def test_skill_selector_validates_and_fills_structured_arguments(tmp_path: Path):
