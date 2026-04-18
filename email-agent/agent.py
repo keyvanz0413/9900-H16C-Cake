@@ -16,6 +16,7 @@ from connectonion import Agent, Memory, WebFetch, Shell, TodoList, llm_do
 from pydantic import BaseModel
 
 from plugins import calendar_approval_plugin, gmail_approval_plugin, re_act
+from tools.attachment_text_tool import extract_recent_attachment_texts_from_email_tool
 from intent_layer import (
     IntentLayerOrchestrator,
     MarkdownMemoryStore,
@@ -656,7 +657,38 @@ web = WebFetch()  # For analyzing contact domains
 shell = Shell()  # For running shell commands (e.g., get current date)
 todo = TodoList()  # For tracking multi-step tasks
 
-# Build tools list based on .env flags
+def _env_flag(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() == "true"
+
+
+def _get_primary_email_tool():
+    for tool in tools:
+        if hasattr(tool, "_get_service"):
+            return tool
+    return None
+
+
+def extract_recent_attachment_texts(query: str, max_results: int = 10) -> str:
+    """Extract text from attachments in recent Gmail inbox emails.
+
+    Args:
+        query: Gmail search query used to select emails whose attachments should be extracted.
+        max_results: Maximum number of recent attachment-bearing emails to scan.
+
+    Returns:
+        A readable summary of recent emails with attachment metadata and extracted text.
+    """
+    email_tool = _get_primary_email_tool()
+    if email_tool is None:
+        return "Recent attachment text extraction is only available when Gmail is connected."
+    return extract_recent_attachment_texts_from_email_tool(
+        email_tool=email_tool,
+        query=query,
+        max_results=max_results,
+    )
+
+
+# Build tools list based on .env flags or existing provider tokens.
 # Note: Only one email provider at a time (tools have overlapping method names)
 has_gmail = os.getenv("LINKED_GMAIL", "").lower() == "true"
 has_outlook = os.getenv("LINKED_OUTLOOK", "").lower() == "true"
@@ -770,6 +802,8 @@ def init_crm_database(max_emails: int = 500, top_n: int = 10, exclude_domains: s
 
 # Add remaining tools to the list
 tools.extend([memory, shell, todo, init_crm_database])
+if has_gmail:
+    tools.append(extract_recent_attachment_texts)
 
 # Create main execution agent (our EmailAgent keeps the pending-email confirmation flow)
 main_agent = EmailAgent(
