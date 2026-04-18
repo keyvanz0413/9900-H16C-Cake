@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import inspect
 import threading
@@ -77,7 +78,7 @@ class SkillSpec:
     name: str
     description: str
     scope: str
-    allowed_tools: tuple[str, ...]
+    used_tools: tuple[str, ...]
     output: str
 
 
@@ -220,15 +221,15 @@ def _coerce_skill_spec(raw_skill: dict[str, Any]) -> SkillSpec | None:
     if not name:
         return None
 
-    allowed_tools = raw_skill.get("allowed_tools") or []
-    if not isinstance(allowed_tools, (list, tuple)):
-        allowed_tools = []
+    used_tools = raw_skill.get("used_tools")
+    if not isinstance(used_tools, (list, tuple)):
+        used_tools = []
 
     return SkillSpec(
         name=name,
         description=str(raw_skill.get("description") or "").strip(),
         scope=str(raw_skill.get("scope") or "").strip(),
-        allowed_tools=tuple(str(tool).strip() for tool in allowed_tools if str(tool).strip()),
+        used_tools=tuple(str(tool).strip() for tool in used_tools if str(tool).strip()),
         output=str(raw_skill.get("output") or "").strip(),
     )
 
@@ -252,7 +253,7 @@ def load_skill_registry(path: Path) -> list[SkillSpec]:
 
     skills: list[SkillSpec] = []
     current: dict[str, Any] | None = None
-    reading_allowed_tools = False
+    reading_used_tools = False
 
     for raw_line in raw_text.splitlines():
         if not raw_line.strip() or raw_line.lstrip().startswith("#"):
@@ -269,8 +270,8 @@ def load_skill_registry(path: Path) -> list[SkillSpec]:
                 spec = _coerce_skill_spec(current)
                 if spec is not None:
                     skills.append(spec)
-            current = {"allowed_tools": []}
-            reading_allowed_tools = False
+            current = {"used_tools": []}
+            reading_used_tools = False
             remainder = stripped[2:].strip()
             if remainder and ":" in remainder:
                 key, value = remainder.split(":", 1)
@@ -284,26 +285,26 @@ def load_skill_registry(path: Path) -> list[SkillSpec]:
             key, value = stripped.split(":", 1)
             key = key.strip()
             value = value.strip()
-            if key == "allowed_tools":
-                reading_allowed_tools = True
+            if key == "used_tools":
+                reading_used_tools = True
                 if value == "[]":
-                    current["allowed_tools"] = []
-                    reading_allowed_tools = False
+                    current["used_tools"] = []
+                    reading_used_tools = False
                 elif value.startswith("[") and value.endswith("]"):
                     inner = value[1:-1]
-                    current["allowed_tools"] = [
+                    current["used_tools"] = [
                         _parse_scalar(item) for item in inner.split(",") if _parse_scalar(item)
                     ]
-                    reading_allowed_tools = False
+                    reading_used_tools = False
                 else:
-                    current.setdefault("allowed_tools", [])
+                    current.setdefault("used_tools", [])
             else:
-                reading_allowed_tools = False
+                reading_used_tools = False
                 current[key] = _parse_scalar(value)
             continue
 
-        if reading_allowed_tools and indent >= 6 and stripped.startswith("- "):
-            current.setdefault("allowed_tools", []).append(_parse_scalar(stripped[2:]))
+        if reading_used_tools and indent >= 6 and stripped.startswith("- "):
+            current.setdefault("used_tools", []).append(_parse_scalar(stripped[2:]))
 
     if current is not None:
         spec = _coerce_skill_spec(current)
@@ -377,21 +378,16 @@ class MarkdownMemoryStore:
         return content or default_content
 
 
-class RestrictedSkillExecutor:
+class PythonSkillExecutor:
     def __init__(
         self,
         *,
-        agent_factory: Callable[..., SupportsInput],
-        system_prompt: str | Path,
+        skills_directory: Path,
         tool_function_map: dict[str, Callable[..., Any]],
-        model: str,
-        default_max_iterations: int = 8,
     ):
-        self._agent_factory = agent_factory
-        self._system_prompt = system_prompt
+        self._skills_directory = skills_directory
         self._tool_function_map = dict(tool_function_map)
-        self._model = model
-        self._default_max_iterations = max(1, int(default_max_iterations))
+        self._execute_cache: dict[str, Callable[..., Any]] = {}
 
     def run(
         self,
@@ -402,15 +398,16 @@ class RestrictedSkillExecutor:
         recent_context: list[DialogueItem],
         max_iterations: int | None = None,
     ) -> SkillExecutionResult:
-        resolved_tools: list[Callable[..., Any]] = []
+        del max_iterations
+        resolved_tools: dict[str, Callable[..., Any]] = {}
         missing_tools: list[str] = []
 
-        for tool_name in skill_spec.allowed_tools:
+        for tool_name in skill_spec.used_tools:
             tool_callable = self._tool_function_map.get(tool_name)
             if tool_callable is None:
                 missing_tools.append(tool_name)
             else:
-                resolved_tools.append(tool_callable)
+                resolved_tools[tool_name] = tool_callable
 
         if missing_tools:
             return SkillExecutionResult(
@@ -423,43 +420,30 @@ class RestrictedSkillExecutor:
                 ),
             )
 
-        skill_iterations = self._default_max_iterations
-        if max_iterations is not None:
-            skill_iterations = max(1, min(int(max_iterations), self._default_max_iterations))
-
-        skill_agent = self._agent_factory(
-            name=f"email-skill-{skill_spec.name}",
-            system_prompt=self._system_prompt,
-            tools=resolved_tools,
-            max_iterations=skill_iterations,
-            model=self._model,
-        )
-
-        prompt = "\n\n".join(
-            [
-                "[SKILL_NAME]",
-                skill_spec.name,
-                "[SKILL_DESCRIPTION]",
-                skill_spec.description or "(empty)",
-                "[SKILL_SCOPE]",
-                skill_spec.scope or "(empty)",
-                "[SKILL_OUTPUT]",
-                skill_spec.output or "(empty)",
-                "[ALLOWED_TOOLS]",
-                ", ".join(skill_spec.allowed_tools) if skill_spec.allowed_tools else "(none)",
-                "[INTENT]",
-                intent_decision.intent,
-                "[RECENT_CONTEXT]",
-                format_context(recent_context),
-                "[CURRENT_USER_MESSAGE]",
-                current_message.strip(),
-            ]
-        )
-
         try:
-            payload = _extract_json_payload(skill_agent.input(prompt, max_iterations=skill_iterations))
+            execute_skill = self._load_execute_skill(skill_spec)
+            payload = execute_skill(
+                current_message=current_message.strip(),
+                intent=intent_decision.intent,
+                recent_context=[
+                    {"role": item.role, "content": item.content}
+                    for item in recent_context
+                ],
+                used_tools=resolved_tools,
+                skill_spec={
+                    "name": skill_spec.name,
+                    "description": skill_spec.description,
+                    "scope": skill_spec.scope,
+                    "output": skill_spec.output,
+                },
+            )
         except Exception as exc:
             raise SkillLayerError(f"Skill '{skill_spec.name}' execution failed: {exc}") from exc
+
+        if isinstance(payload, SkillExecutionResult):
+            return payload
+        if not isinstance(payload, dict):
+            raise SkillLayerError(f"Skill '{skill_spec.name}' returned a non-dict result.")
 
         completed = bool(payload.get("completed"))
         response_raw = payload.get("response")
@@ -483,6 +467,35 @@ class RestrictedSkillExecutor:
             response=response,
             reason=reason,
         )
+
+    def _load_execute_skill(self, skill_spec: SkillSpec) -> Callable[..., Any]:
+        module_path = (self._skills_directory / f"{skill_spec.name}.py").resolve()
+        cache_key = str(module_path)
+        cached = self._execute_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        if not module_path.exists():
+            raise SkillLayerError(
+                f"Skill '{skill_spec.name}' is registered but its Python file is missing: {module_path}"
+            )
+
+        module_name = "email_agent_skill_" + "".join(
+            character if character.isalnum() or character == "_" else "_"
+            for character in skill_spec.name
+        )
+        spec = importlib.util.spec_from_file_location(module_name, module_path)
+        if spec is None or spec.loader is None:
+            raise SkillLayerError(f"Skill '{skill_spec.name}' could not be loaded from {module_path}")
+
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        execute_skill = getattr(module, "execute_skill", None)
+        if not callable(execute_skill):
+            raise SkillLayerError(f"Skill '{skill_spec.name}' must expose a callable execute_skill(...)")
+
+        self._execute_cache[cache_key] = execute_skill
+        return execute_skill
 
 
 class IntentLayerOrchestrator:
@@ -554,6 +567,8 @@ class IntentLayerOrchestrator:
                     "skill_selection",
                     confidence=intent_decision.no_execution_confidence,
                     intent=intent_decision.intent,
+                    skill_selected=selection.should_use_skill,
+                    selected_skill=selection.skill_name or "(none)",
                     should_use_skill=selection.should_use_skill,
                     skill_name=selection.skill_name,
                     reason=selection.reason,
@@ -567,7 +582,7 @@ class IntentLayerOrchestrator:
                         self._log_route(
                             "skill_execution_started",
                             skill_name=skill_spec.name,
-                            allowed_tools=", ".join(skill_spec.allowed_tools),
+                            used_tools=", ".join(skill_spec.used_tools),
                         )
                         skill_execution_result = self._skill_executor.run(
                             skill_spec,
@@ -776,8 +791,8 @@ class IntentLayerOrchestrator:
                 f"  description: {spec.description or '(empty)'}",
                 f"  scope: {spec.scope or '(empty)'}",
             ]
-            if spec.allowed_tools:
-                lines.append(f"  allowed_tools: {', '.join(spec.allowed_tools)}")
+            if spec.used_tools:
+                lines.append(f"  used_tools: {', '.join(spec.used_tools)}")
             if spec.output:
                 lines.append(f"  output: {spec.output}")
             skills_block.append("\n".join(lines))

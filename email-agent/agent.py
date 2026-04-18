@@ -13,33 +13,20 @@ from connectonion.useful_plugins import re_act, gmail_plugin, calendar_plugin
 from intent_layer import (
     IntentLayerOrchestrator,
     MarkdownMemoryStore,
-    RestrictedSkillExecutor,
+    PythonSkillExecutor,
     build_tool_function_map,
 )
-
-
-def _get_int_env(name: str, default: int) -> int:
-    raw_value = os.getenv(name)
-    if raw_value is None:
-        return default
-    try:
-        return int(raw_value)
-    except ValueError:
-        return default
 
 MODEL_NAME = os.getenv("AGENT_MODEL", "co/claude-sonnet-4-5")
 INTENT_MODEL_NAME = os.getenv("INTENT_LAYER_MODEL", MODEL_NAME)
 SKILL_SELECTOR_MODEL_NAME = os.getenv("SKILL_SELECTOR_MODEL", INTENT_MODEL_NAME)
-SKILL_EXECUTOR_MODEL_NAME = os.getenv("SKILL_EXECUTOR_MODEL", MODEL_NAME)
 USER_MEMORY_MODEL_NAME = os.getenv("USER_MEMORY_MODEL", INTENT_MODEL_NAME)
-SKILL_EXECUTOR_MAX_ITERATIONS = _get_int_env("SKILL_EXECUTOR_MAX_ITERATIONS", 8)
 
 BASE_DIR = Path(__file__).resolve().parent
 PROMPTS_DIR = BASE_DIR / "prompts"
 SKILL_REGISTRY_PATH = BASE_DIR / "skills" / "registry.yaml"
 USER_PROFILE_PATH = BASE_DIR / "USER_PROFILE.md"
 USER_HABITS_PATH = BASE_DIR / "USER_HABITS.md"
-SKILL_EXECUTOR_PROMPT_PATH = PROMPTS_DIR / "skill_executor.md"
 
 
 class OpenAICompatibleGmailMixin:
@@ -54,13 +41,21 @@ web = WebFetch()  # For analyzing contact domains
 shell = Shell()  # For running shell commands (e.g., get current date)
 todo = TodoList()  # For tracking multi-step tasks
 
-# Build tools list based on .env flags
-# Note: Only one email provider at a time (tools have overlapping method names)
-has_gmail = os.getenv("LINKED_GMAIL", "").lower() == "true"
-has_outlook = os.getenv("LINKED_OUTLOOK", "").lower() == "true"
+def _env_flag(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() == "true"
 
+
+# Build tools list based on .env flags or existing provider tokens.
+# Note: Only one email provider at a time (tools have overlapping method names)
 tools = []
 plugins = [re_act]
+
+has_gmail = _env_flag("LINKED_GMAIL") or bool(
+    os.getenv("GOOGLE_ACCESS_TOKEN") or os.getenv("GOOGLE_REFRESH_TOKEN")
+)
+has_outlook = _env_flag("LINKED_OUTLOOK") or bool(
+    os.getenv("MICROSOFT_ACCESS_TOKEN") or os.getenv("MICROSOFT_REFRESH_TOKEN")
+)
 
 # Prefer Gmail if both are linked (can only use one due to method name conflicts)
 if has_gmail:
@@ -165,12 +160,9 @@ memory_store = MarkdownMemoryStore(
     writer_agent=user_memory_writer_agent,
 )
 
-skill_executor = RestrictedSkillExecutor(
-    agent_factory=Agent,
-    system_prompt=SKILL_EXECUTOR_PROMPT_PATH,
+skill_executor = PythonSkillExecutor(
+    skills_directory=BASE_DIR / "skills",
     tool_function_map=build_tool_function_map(tools),
-    model=SKILL_EXECUTOR_MODEL_NAME,
-    default_max_iterations=SKILL_EXECUTOR_MAX_ITERATIONS,
 )
 
 agent = IntentLayerOrchestrator(

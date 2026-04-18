@@ -10,7 +10,7 @@ from intent_layer import (
     IntentLayerError,
     IntentLayerOrchestrator,
     MarkdownMemoryStore,
-    RestrictedSkillExecutor,
+    PythonSkillExecutor,
     SkillLayerError,
     SkillExecutionResult,
     SkillSpec,
@@ -96,7 +96,7 @@ def test_load_skill_registry_parses_yaml_shape(tmp_path: Path):
                 "  - name: compose_email_from_context",
                 "    description: Draft an email from mailbox context",
                 "    scope: Can only draft, never send",
-                "    allowed_tools:",
+                "    used_tools:",
                 "      - search_emails",
                 "      - read_memory",
                 "    output: email_draft",
@@ -110,7 +110,7 @@ def test_load_skill_registry_parses_yaml_shape(tmp_path: Path):
 
     assert len(skills) == 1
     assert skills[0].name == "compose_email_from_context"
-    assert skills[0].allowed_tools == ("search_emails", "read_memory")
+    assert skills[0].used_tools == ("search_emails", "read_memory")
 
 
 def test_orchestrator_direct_response_skips_main_agent(tmp_path: Path):
@@ -466,6 +466,8 @@ def test_orchestrator_logs_confidence_for_non_direct_routes(tmp_path: Path):
     assert result == "Main agent handled the request."
     assert '"event": "skill_selection"' in log_output
     assert '"confidence": 3.0' in log_output
+    assert '"skill_selected": false' in log_output
+    assert '"selected_skill": "(none)"' in log_output
     assert '"event": "main_agent"' in log_output
     assert '"event": "memory_update"' in log_output
 
@@ -479,7 +481,7 @@ def test_orchestrator_returns_selected_skill_response_without_main_agent(tmp_pat
                 "  - name: compose_email_from_context",
                 "    description: Draft an email from mailbox context",
                 "    scope: Can only draft, never send",
-                "    allowed_tools:",
+                "    used_tools:",
                 "      - search_emails",
                 "    output: email_draft",
             ]
@@ -569,7 +571,7 @@ def test_orchestrator_falls_back_to_main_agent_when_skill_cannot_complete(tmp_pa
                 "  - name: compose_email_from_context",
                 "    description: Draft an email from mailbox context",
                 "    scope: Can only draft, never send",
-                "    allowed_tools:",
+                "    used_tools:",
                 "      - search_emails",
                 "    output: email_draft",
             ]
@@ -657,7 +659,7 @@ def test_orchestrator_raises_when_skill_selector_llm_output_is_invalid(tmp_path:
                 "  - name: compose_email_from_context",
                 "    description: Draft an email from mailbox context",
                 "    scope: Can only draft, never send",
-                "    allowed_tools:",
+                "    used_tools:",
                 "      - search_emails",
                 "    output: email_draft",
             ]
@@ -717,33 +719,29 @@ def test_orchestrator_raises_when_skill_selector_llm_output_is_invalid(tmp_path:
     assert len(main_agent.calls) == 0
 
 
-def test_restricted_skill_executor_passes_only_allowed_tools():
+def test_python_skill_executor_runs_selected_python_skill_file(tmp_path: Path):
     toolbox = ToolBox()
     tool_function_map = build_tool_function_map([toolbox])
-    built_agents: list[dict[str, object]] = []
-
-    def fake_agent_factory(**kwargs):
-        built_agents.append(kwargs)
-        return FakeAgent(
+    skill_file = tmp_path / "compose_email_from_context.py"
+    skill_file.write_text(
+        "\n".join(
             [
-                json.dumps(
-                    {
-                        "completed": True,
-                        "response": "Draft ready.",
-                        "reason": "Completed inside the restricted skill scope.",
-                    }
-                )
-            ],
-            name=kwargs["name"],
-            max_iterations=kwargs["max_iterations"],
+                "def execute_skill(*, current_message, intent, recent_context, used_tools, skill_spec):",
+                "    result = used_tools['search_emails'](query=current_message)",
+                "    return {",
+                "        'completed': True,",
+                "        'response': f'Skill response: {result}',",
+                "        'reason': f\"Used {skill_spec['name']} directly.\",",
+                "    }",
+            ]
         )
+        + "\n",
+        encoding="utf-8",
+    )
 
-    executor = RestrictedSkillExecutor(
-        agent_factory=fake_agent_factory,
-        system_prompt="prompt.md",
+    executor = PythonSkillExecutor(
+        skills_directory=tmp_path,
         tool_function_map=tool_function_map,
-        model="test-model",
-        default_max_iterations=8,
     )
 
     result = executor.run(
@@ -751,7 +749,7 @@ def test_restricted_skill_executor_passes_only_allowed_tools():
             name="compose_email_from_context",
             description="Draft an email",
             scope="Can only draft, never send",
-            allowed_tools=("search_emails",),
+            used_tools=("search_emails",),
             output="email_draft",
         ),
         current_message="Draft a reply.",
@@ -761,22 +759,16 @@ def test_restricted_skill_executor_passes_only_allowed_tools():
             {"intent": "Draft an email reply from mailbox context."},
         )(),
         recent_context=[],
-        max_iterations=10,
     )
 
     assert result.completed is True
-    assert len(built_agents) == 1
-    passed_tools = built_agents[0]["tools"]
-    assert [tool.__name__ for tool in passed_tools] == ["search_emails"]
+    assert result.response == "Skill response: search:Draft a reply."
 
 
-def test_restricted_skill_executor_fails_when_allowed_tool_is_missing():
-    executor = RestrictedSkillExecutor(
-        agent_factory=lambda **kwargs: FakeAgent(["should not be created"]),
-        system_prompt="prompt.md",
+def test_python_skill_executor_fails_when_used_tool_is_missing(tmp_path: Path):
+    executor = PythonSkillExecutor(
+        skills_directory=tmp_path,
         tool_function_map={},
-        model="test-model",
-        default_max_iterations=8,
     )
 
     result = executor.run(
@@ -784,7 +776,7 @@ def test_restricted_skill_executor_fails_when_allowed_tool_is_missing():
             name="compose_email_from_context",
             description="Draft an email",
             scope="Can only draft, never send",
-            allowed_tools=("search_emails",),
+            used_tools=("search_emails",),
             output="email_draft",
         ),
         current_message="Draft a reply.",
@@ -800,13 +792,22 @@ def test_restricted_skill_executor_fails_when_allowed_tool_is_missing():
     assert "search_emails" in result.reason
 
 
-def test_restricted_skill_executor_raises_when_llm_output_is_invalid():
-    executor = RestrictedSkillExecutor(
-        agent_factory=lambda **kwargs: FakeAgent(["not json"]),
-        system_prompt="prompt.md",
+def test_python_skill_executor_raises_when_skill_output_is_invalid(tmp_path: Path):
+    skill_file = tmp_path / "compose_email_from_context.py"
+    skill_file.write_text(
+        "\n".join(
+            [
+                "def execute_skill(*, current_message, intent, recent_context, used_tools, skill_spec):",
+                "    return 'not a dict'",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    executor = PythonSkillExecutor(
+        skills_directory=tmp_path,
         tool_function_map={"search_emails": lambda query: f"search:{query}"},
-        model="test-model",
-        default_max_iterations=8,
     )
 
     try:
@@ -815,7 +816,7 @@ def test_restricted_skill_executor_raises_when_llm_output_is_invalid():
                 name="compose_email_from_context",
                 description="Draft an email",
                 scope="Can only draft, never send",
-                allowed_tools=("search_emails",),
+                used_tools=("search_emails",),
                 output="email_draft",
             ),
             current_message="Draft a reply.",
