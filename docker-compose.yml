@@ -16,6 +16,7 @@ services:
       - ./email-agent/data:/app/data
       - ./email-agent/USER_PROFILE.md:/app/USER_PROFILE.md
       - ./email-agent/USER_HABITS.md:/app/USER_HABITS.md
+      - ./email-agent/WRITING_STYLE.md:/app/WRITING_STYLE.md
 
   oo-chat:
     build:

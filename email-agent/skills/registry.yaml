@@ -21,4 +21,25 @@
 #         default: true
 #         description: Whether to include unanswered-thread context.
 #     output: A concise weekly inbox summary.
-skills: []
+skills:
+  - name: weekly_email_summary
+    description: Summarize recent email activity for a recent time window using mailbox identity, inbox, unanswered, and calendar context.
+    scope: Read-only weekly summary workflow. Never send email and never modify mailbox state.
+    used_tools:
+      - get_my_identity
+      - search_emails
+      - get_unanswered_emails
+      - list_events
+    input_schema:
+      days:
+        type: int
+        required: false
+        default: 7
+        description: Number of recent days to summarize.
+    output: A user-facing weekly email summary grounded only in the collected identity, inbox, unanswered, and calendar tool results.
+  - name: writing_style_profile
+    description: Build or update a persistent writing style profile from the user's recent sent emails.
+    scope: Read recent sent emails and update the local writing style markdown only. Never send email and never modify mailbox state beyond WRITING_STYLE.md.
+    used_tools:
+      - get_sent_emails
+    output: A user-facing confirmation plus the updated WRITING_STYLE markdown derived from recent sent emails.

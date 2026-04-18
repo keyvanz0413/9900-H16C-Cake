@@ -21,6 +21,7 @@ MODEL_NAME = os.getenv("AGENT_MODEL", "co/claude-sonnet-4-5")
 INTENT_MODEL_NAME = os.getenv("INTENT_LAYER_MODEL", MODEL_NAME)
 SKILL_SELECTOR_MODEL_NAME = os.getenv("SKILL_SELECTOR_MODEL", INTENT_MODEL_NAME)
 SKILL_FINALIZER_MODEL_NAME = os.getenv("SKILL_FINALIZER_MODEL", INTENT_MODEL_NAME)
+WRITING_STYLE_MODEL_NAME = os.getenv("WRITING_STYLE_MODEL", INTENT_MODEL_NAME)
 USER_MEMORY_MODEL_NAME = os.getenv("USER_MEMORY_MODEL", INTENT_MODEL_NAME)
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -28,6 +29,7 @@ PROMPTS_DIR = BASE_DIR / "prompts"
 SKILL_REGISTRY_PATH = BASE_DIR / "skills" / "registry.yaml"
 USER_PROFILE_PATH = BASE_DIR / "USER_PROFILE.md"
 USER_HABITS_PATH = BASE_DIR / "USER_HABITS.md"
+WRITING_STYLE_PATH = BASE_DIR / "WRITING_STYLE.md"
 
 
 class OpenAICompatibleGmailMixin:
@@ -163,6 +165,14 @@ user_memory_writer_agent = Agent(
     model=USER_MEMORY_MODEL_NAME,
 )
 
+writing_style_writer_agent = Agent(
+    name="email-agent-writing-style-writer",
+    system_prompt=PROMPTS_DIR / "writing_style_writer.md",
+    tools=[],
+    max_iterations=1,
+    model=WRITING_STYLE_MODEL_NAME,
+)
+
 memory_store = MarkdownMemoryStore(
     profile_path=USER_PROFILE_PATH,
     habits_path=USER_HABITS_PATH,
@@ -172,6 +182,14 @@ memory_store = MarkdownMemoryStore(
 skill_executor = PythonSkillExecutor(
     skills_directory=BASE_DIR / "skills",
     tool_function_map=build_tool_function_map(tools),
+    skill_runtime={
+        "agents": {
+            "writing_style_writer": writing_style_writer_agent,
+        },
+        "paths": {
+            "writing_style_markdown": WRITING_STYLE_PATH,
+        },
+    },
 )
 
 agent = IntentLayerOrchestrator(

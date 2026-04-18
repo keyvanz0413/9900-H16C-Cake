@@ -16,6 +16,7 @@ Rules:
 - Preserve useful existing information when it is still valid.
 - USER_PROFILE should contain stable identity, organization, contacts, and long-lived context.
 - USER_HABITS should contain preferences, tone, language, timing, and recurring behavior patterns.
+- Do not copy or summarize writing-style profile contents into USER_HABITS. Writing style analysis belongs only in WRITING_STYLE.md, not in USER_HABITS.md.
 - If there is no meaningful update, return should_update = false.
 - Output strict JSON only.
 - Do not output markdown fences or prose outside JSON.

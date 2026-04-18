@@ -13,7 +13,7 @@ from typing import Any, Callable, Protocol
 CONTEXT_WINDOW_LIMIT = 50
 OLDER_CONTEXT_LIMIT = 40
 RECENT_CONTEXT_LIMIT = 10
-DIRECT_RESPONSE_THRESHOLD = 8.0
+DIRECT_RESPONSE_THRESHOLD = 9.0
 
 DEFAULT_USER_PROFILE = """# User Profile
 
@@ -631,9 +631,11 @@ class PythonSkillExecutor:
         *,
         skills_directory: Path,
         tool_function_map: dict[str, Callable[..., Any]],
+        skill_runtime: dict[str, Any] | None = None,
     ):
         self._skills_directory = skills_directory
         self._tool_function_map = dict(tool_function_map)
+        self._skill_runtime = dict(skill_runtime or {})
         self._execute_cache: dict[str, Callable[..., Any]] = {}
 
     def run(
@@ -675,10 +677,11 @@ class PythonSkillExecutor:
                 error_type=SkillLayerError,
             )
             execute_skill = self._load_execute_skill(skill_spec)
-            payload = execute_skill(
-                arguments=validated_arguments,
-                used_tools=resolved_tools,
-                skill_spec={
+            execute_skill_signature = inspect.signature(execute_skill)
+            execute_skill_kwargs = {
+                "arguments": validated_arguments,
+                "used_tools": resolved_tools,
+                "skill_spec": {
                     "name": skill_spec.name,
                     "description": skill_spec.description,
                     "scope": skill_spec.scope,
@@ -694,6 +697,15 @@ class PythonSkillExecutor:
                         for field_spec in skill_spec.input_schema
                     ],
                 },
+            }
+            if (
+                "skill_runtime" in execute_skill_signature.parameters
+                or any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in execute_skill_signature.parameters.values())
+            ):
+                execute_skill_kwargs["skill_runtime"] = self._skill_runtime
+
+            payload = execute_skill(
+                **execute_skill_kwargs,
             )
         except Exception as exc:
             raise SkillLayerError(f"Skill '{skill_spec.name}' execution failed: {exc}") from exc
@@ -1047,9 +1059,9 @@ class IntentLayerOrchestrator:
         final_response_raw = payload.get("final_response")
         final_response = None if final_response_raw is None else str(final_response_raw).strip()
         if confidence > DIRECT_RESPONSE_THRESHOLD and not final_response:
-            raise IntentLayerError("Intent layer returned no_execution_confidence > 8 without a final_response.")
+            raise IntentLayerError("Intent layer returned no_execution_confidence > 9.0 without a final_response.")
         if confidence <= DIRECT_RESPONSE_THRESHOLD and final_response is not None:
-            raise IntentLayerError("Intent layer returned final_response even though no_execution_confidence <= 8.")
+            raise IntentLayerError("Intent layer returned final_response even though no_execution_confidence <= 9.0.")
         if confidence <= DIRECT_RESPONSE_THRESHOLD:
             final_response = None
 

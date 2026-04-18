@@ -27,9 +27,9 @@ Rules:
 - Output strict JSON only.
 - Do not output markdown, prose outside JSON, or code fences.
 - All confidence values must be numbers from 0 to 10.
-- Only when no_execution_confidence > 8 may the backend directly return final_response.
-- If no_execution_confidence > 8, final_response must be a complete reply.
-- If no_execution_confidence <= 8, final_response must be null.
+- Only when no_execution_confidence > 9.0 may the backend directly return final_response.
+- If no_execution_confidence > 9.0, final_response must be a complete reply.
+- If no_execution_confidence <= 9.0, final_response must be null.
 - intent must be one sentence describing what the user is trying to do now.
 - user_update_summary should mention only newly supported user profile or habit details. If there is nothing meaningful to add, say "No meaningful update."
 - Never invent facts that are not supported by the conversation or the existing profile/habits markdown.

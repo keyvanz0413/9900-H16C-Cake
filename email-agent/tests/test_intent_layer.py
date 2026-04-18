@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import threading
 from contextlib import redirect_stdout
 from pathlib import Path
 
@@ -74,6 +75,48 @@ class ToolBox:
     def send(self, recipient: str, body: str) -> str:
         """Send email."""
         return f"sent:{recipient}:{body}"
+
+
+class WeeklySummaryToolBox:
+    def __init__(self):
+        self.calls: list[tuple[str, dict[str, object]]] = []
+        self._lock = threading.Lock()
+
+    def _record(self, tool_name: str, **kwargs: object) -> str:
+        with self._lock:
+            self.calls.append((tool_name, kwargs))
+        return f"{tool_name}:{json.dumps(kwargs, ensure_ascii=False, sort_keys=True)}"
+
+    def get_my_identity(self) -> str:
+        return self._record("get_my_identity")
+
+    def search_emails(self, query: str, max_results: int = 10) -> str:
+        return self._record("search_emails", query=query, max_results=max_results)
+
+    def get_unanswered_emails(self, within_days: int = 120, max_results: int = 20) -> str:
+        return self._record("get_unanswered_emails", within_days=within_days, max_results=max_results)
+
+    def list_events(self, days_ahead: int = 7, max_results: int = 20) -> str:
+        return self._record("list_events", days_ahead=days_ahead, max_results=max_results)
+
+
+class WritingStyleToolBox:
+    def __init__(self):
+        self.calls: list[tuple[str, dict[str, object]]] = []
+        self._lock = threading.Lock()
+
+    def get_sent_emails(self, max_results: int = 10) -> str:
+        with self._lock:
+            self.calls.append(("get_sent_emails", {"max_results": max_results}))
+        return (
+            "Found sent emails:\n"
+            "- Subject: Coffee Chat Tomorrow at 3 PM\n"
+            "  Body: Hi Zenglin, Would you be available to meet for a coffee chat tomorrow at 3 PM?\n"
+            "- Subject: Next week\n"
+            "  Body: Hi Zenglin Zhong, I wanted to reach out about next week.\n"
+            "- Subject: 明晚一起吃饭\n"
+            "  Body: Zenglin 你好， 你明天晚上有空一起吃晚饭吗？"
+        )
 
 
 def make_noop_skill_finalizer() -> FakeAgent:
@@ -997,6 +1040,171 @@ def test_python_skill_executor_raises_when_skill_output_is_invalid(tmp_path: Pat
         raise AssertionError("Expected SkillLayerError to be raised.")
     except SkillLayerError:
         pass
+
+
+def test_weekly_email_summary_skill_uses_fixed_workflow(repo_root: Path | None = None):
+    del repo_root
+    toolbox = WeeklySummaryToolBox()
+    tool_function_map = build_tool_function_map([toolbox])
+    skills_directory = Path(__file__).resolve().parent.parent / "skills"
+
+    executor = PythonSkillExecutor(
+        skills_directory=skills_directory,
+        tool_function_map=tool_function_map,
+    )
+
+    result = executor.run(
+        SkillSpec(
+            name="weekly_email_summary",
+            description="Summarize recent email activity for a recent time window using mailbox identity, inbox, unanswered, and calendar context.",
+            scope="Read-only weekly summary workflow. Never send email and never modify mailbox state.",
+            used_tools=("get_my_identity", "search_emails", "get_unanswered_emails", "list_events"),
+            output="A user-facing weekly email summary grounded only in the collected identity, inbox, unanswered, and calendar tool results.",
+            input_schema=(
+                SkillInputFieldSpec(
+                    name="days",
+                    field_type="int",
+                    required=False,
+                    description="Number of recent days to summarize.",
+                    has_default=True,
+                    default=7,
+                ),
+            ),
+        ),
+        skill_arguments={"days": 3},
+        current_message="总结最近3天邮件",
+        intent_decision=type(
+            "IntentDecisionLike",
+            (),
+            {"intent": "用户想让我按最近3天的邮件范围进行总结。"},
+        )(),
+        recent_context=[],
+    )
+
+    assert result.completed is True
+    assert "[WEEKLY_EMAIL_SUMMARY_BUNDLE]" in result.response
+    assert "search_query: newer_than:3d" in result.response
+    assert "[GET_MY_IDENTITY]" in result.response
+    assert "[SEARCH_EMAILS]" in result.response
+    assert "[GET_UNANSWERED_EMAILS]" in result.response
+    assert "[LIST_EVENTS]" in result.response
+
+    calls_by_name = {name: kwargs for name, kwargs in toolbox.calls}
+    assert calls_by_name["get_my_identity"] == {}
+    assert calls_by_name["search_emails"] == {"query": "newer_than:3d", "max_results": 350}
+    assert calls_by_name["get_unanswered_emails"] == {"within_days": 3, "max_results": 50}
+    assert calls_by_name["list_events"] == {"days_ahead": 3, "max_results": 20}
+
+
+def test_writing_style_profile_skill_creates_and_updates_markdown(tmp_path: Path):
+    toolbox = WritingStyleToolBox()
+    writer_agent = FakeAgent(
+        [
+            json.dumps(
+                {
+                    "writing_style_markdown": (
+                        "# Writing Style\n\n"
+                        "## Snapshot\n\n"
+                        "- Friendly and concise.\n\n"
+                        "## Subject Lines\n\n"
+                        "- Often short and direct.\n"
+                    ),
+                    "user_summary": "I extracted a concise, friendly writing style profile from your most recent sent emails.",
+                    "reason": "Created an initial writing style profile from recent sent emails.",
+                }
+            ),
+            json.dumps(
+                {
+                    "writing_style_markdown": (
+                        "# Writing Style\n\n"
+                        "## Snapshot\n\n"
+                        "- Friendly, concise, and comfortable mixing Chinese and English.\n\n"
+                        "## Subject Lines\n\n"
+                        "- Often short and direct.\n\n"
+                        "## Language Usage\n\n"
+                        "- Mixes English scheduling phrases with Chinese outreach naturally.\n"
+                    ),
+                    "user_summary": "I added your mixed-language habits and meeting-outreach patterns on top of the existing profile.",
+                    "reason": "Updated the profile using the existing markdown plus the latest sent email evidence.",
+                }
+            ),
+        ],
+        name="writing-style-writer",
+    )
+    skills_directory = Path(__file__).resolve().parent.parent / "skills"
+    writing_style_path = tmp_path / "WRITING_STYLE.md"
+
+    executor = PythonSkillExecutor(
+        skills_directory=skills_directory,
+        tool_function_map=build_tool_function_map([toolbox]),
+        skill_runtime={
+            "agents": {
+                "writing_style_writer": writer_agent,
+            },
+            "paths": {
+                "writing_style_markdown": writing_style_path,
+            },
+        },
+    )
+
+    skill_spec = SkillSpec(
+        name="writing_style_profile",
+        description="Build or update a persistent writing style profile from the user's recent sent emails.",
+        scope="Read recent sent emails and update the local writing style markdown only. Never send email and never modify mailbox state beyond WRITING_STYLE.md.",
+        used_tools=("get_sent_emails",),
+        output="A user-facing confirmation plus the updated WRITING_STYLE markdown derived from recent sent emails.",
+    )
+
+    first_result = executor.run(
+        skill_spec,
+        skill_arguments={},
+        current_message="总结我的写作风格",
+        intent_decision=type(
+            "IntentDecisionLike",
+            (),
+            {"intent": "用户想根据最近发送的邮件建立写作风格档案。"},
+        )(),
+        recent_context=[],
+    )
+
+    assert first_result.completed is True
+    assert writing_style_path.exists()
+    assert "[WRITING_STYLE_PROFILE_UPDATED]" in first_result.response
+    assert "action: created" in first_result.response
+    assert "[WRITING_STYLE_MARKDOWN]" in first_result.response
+    first_markdown = writing_style_path.read_text(encoding="utf-8")
+    assert "Friendly and concise." in first_markdown
+
+    first_prompt, _, _, _, _ = writer_agent.calls[0]
+    assert "[CURRENT_WRITING_STYLE]" in first_prompt
+    assert "No writing style profile yet." in first_prompt
+    assert "[RECENT_SENT_EMAILS]" in first_prompt
+    assert "Coffee Chat Tomorrow at 3 PM" in first_prompt
+
+    second_result = executor.run(
+        skill_spec,
+        skill_arguments={},
+        current_message="再更新一下我的写作风格",
+        intent_decision=type(
+            "IntentDecisionLike",
+            (),
+            {"intent": "用户想在已有写作风格档案基础上继续更新。"},
+        )(),
+        recent_context=[],
+    )
+
+    assert second_result.completed is True
+    assert "action: updated" in second_result.response
+    second_markdown = writing_style_path.read_text(encoding="utf-8")
+    assert "comfortable mixing Chinese and English" in second_markdown
+
+    second_prompt, _, _, _, _ = writer_agent.calls[1]
+    assert "Friendly and concise." in second_prompt
+    assert "Coffee Chat Tomorrow at 3 PM" in second_prompt
+    assert "Everything you write must be in English." not in second_prompt
+
+    calls_by_name = {name: kwargs for name, kwargs in toolbox.calls}
+    assert calls_by_name["get_sent_emails"] == {"max_results": 30}
 
 
 def test_skill_selector_validates_and_fills_structured_arguments(tmp_path: Path):
