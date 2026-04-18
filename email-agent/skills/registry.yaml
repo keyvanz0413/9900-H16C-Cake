@@ -43,3 +43,17 @@ skills:
     used_tools:
       - get_sent_emails
     output: A user-facing confirmation plus the updated WRITING_STYLE markdown derived from recent sent emails.
+  - name: urgent_email_triage
+    description: Find recent inbox emails that look urgent, need attention, or appear high-priority, add unanswered-thread context, and fetch full bodies for both matched urgent emails and unresolved unanswered emails.
+    scope: Read-only urgent-email triage workflow. Never send email and never modify mailbox state.
+    used_tools:
+      - search_emails
+      - get_unanswered_emails
+      - get_email_body
+    input_schema:
+      days:
+        type: int
+        required: false
+        default: 7
+        description: Number of recent days to inspect for urgent, attention-needed, or high-priority emails, capped at 7.
+    output: A user-facing triage of recent inbox emails that look urgent, need attention, or appear high-priority, grounded only in keyword search hits, unanswered-thread context, and the fetched full bodies of matched urgent and unresolved unanswered emails.

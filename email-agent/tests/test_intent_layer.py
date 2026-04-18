@@ -119,6 +119,60 @@ class WritingStyleToolBox:
         )
 
 
+class UrgentEmailToolBox:
+    def __init__(self):
+        self.calls: list[tuple[str, dict[str, object]]] = []
+        self._lock = threading.Lock()
+
+    def _record(self, tool_name: str, **kwargs: object) -> None:
+        with self._lock:
+            self.calls.append((tool_name, kwargs))
+
+    def search_emails(self, query: str, max_results: int = 10) -> str:
+        self._record("search_emails", query=query, max_results=max_results)
+        if "from:founder@example.com" in query:
+            return (
+                "Found 1 email(s):\n\n"
+                "1. [UNREAD] From: Founder <founder@example.com>\n"
+                "   Subject: urgent deadline update\n"
+                "   Date: Thu, 17 Apr 2026 17:00:00 +0000\n"
+                "   Preview: Need your response before EOD...\n"
+                "   ID: unanswered-001\n"
+            )
+        return (
+            "Found 3 email(s):\n\n"
+            "1. [UNREAD] From: Ops <ops@example.com>\n"
+            "   Subject: ACTION REQUIRED: billing issue\n"
+            "   Date: Fri, 18 Apr 2026 09:00:00 +0000\n"
+            "   Preview: Please respond today about the billing issue...\n"
+            "   ID: urgent-001\n\n"
+            "2. [UNREAD] From: Security <security@example.com>\n"
+            "   Subject: Security alert\n"
+            "   Date: Fri, 18 Apr 2026 08:30:00 +0000\n"
+            "   Preview: Immediate review recommended...\n"
+            "   ID: urgent-002\n\n"
+            "3. [UNREAD] From: Founder <founder@example.com>\n"
+            "   Subject: urgent deadline update\n"
+            "   Date: Thu, 17 Apr 2026 17:00:00 +0000\n"
+            "   Preview: Need your response before EOD...\n"
+            "   ID: urgent-003\n"
+        )
+
+    def get_unanswered_emails(self, within_days: int = 120, max_results: int = 20) -> str:
+        self._record("get_unanswered_emails", within_days=within_days, max_results=max_results)
+        return (
+            f"Found 1 unanswered email(s) from the last {within_days} days:\n\n"
+            "1. From: Founder <founder@example.com>\n"
+            "   Subject: urgent deadline update\n"
+            "   Age: 1 days (2 messages in thread)\n"
+            "   Thread ID: thread-123\n"
+        )
+
+    def get_email_body(self, email_id: str) -> str:
+        self._record("get_email_body", email_id=email_id)
+        return f"Email body for {email_id}"
+
+
 def make_noop_skill_finalizer() -> FakeAgent:
     return FakeAgent(['{"final_response":"should not be used","reason":"noop"}'], name="skill-finalizer")
 
@@ -1205,6 +1259,95 @@ def test_writing_style_profile_skill_creates_and_updates_markdown(tmp_path: Path
 
     calls_by_name = {name: kwargs for name, kwargs in toolbox.calls}
     assert calls_by_name["get_sent_emails"] == {"max_results": 30}
+
+
+def test_urgent_email_triage_skill_uses_fixed_workflow(repo_root: Path | None = None):
+    del repo_root
+    toolbox = UrgentEmailToolBox()
+    tool_function_map = build_tool_function_map([toolbox])
+    skills_directory = Path(__file__).resolve().parent.parent / "skills"
+
+    executor = PythonSkillExecutor(
+        skills_directory=skills_directory,
+        tool_function_map=tool_function_map,
+    )
+
+    result = executor.run(
+        SkillSpec(
+            name="urgent_email_triage",
+            description="Find recent inbox emails that look urgent, need attention, or appear high-priority, add unanswered-thread context, and fetch full bodies for both matched urgent emails and unresolved unanswered emails.",
+            scope="Read-only urgent-email triage workflow. Never send email and never modify mailbox state.",
+            used_tools=("search_emails", "get_unanswered_emails", "get_email_body"),
+            output="A user-facing triage of recent inbox emails that look urgent, need attention, or appear high-priority, grounded only in keyword search hits, unanswered-thread context, and the fetched full bodies of matched urgent and unresolved unanswered emails.",
+            input_schema=(
+                SkillInputFieldSpec(
+                    name="days",
+                    field_type="int",
+                    required=False,
+                    description="Number of recent days to inspect for urgent, attention-needed, or high-priority emails.",
+                    has_default=True,
+                    default=7,
+                ),
+            ),
+        ),
+        skill_arguments={"days": 10},
+        current_message="看看最近10天有没有紧急邮件",
+        intent_decision=type(
+            "IntentDecisionLike",
+            (),
+            {"intent": "用户想让我查找最近10天的紧急或高优先级邮件。"},
+        )(),
+        recent_context=[],
+    )
+
+    assert result.completed is True
+    assert "[URGENT_EMAIL_TRIAGE_BUNDLE]" in result.response
+    assert "search_query: in:inbox newer_than:7d" in result.response
+    assert "max_lookback_days: 7" in result.response
+    assert "[SEARCH_EMAILS]" in result.response
+    assert "[GET_UNANSWERED_EMAILS]" in result.response
+    assert "[MATCHED_URGENT_EMAIL_IDS]" in result.response
+    assert "[EMAIL_BODY_RESULTS]" in result.response
+    assert "[EMAIL_BODY_1]" in result.response
+    assert "[EMAIL_BODY_3]" in result.response
+    assert "[UNANSWERED_EMAIL_ID_LOOKUPS]" in result.response
+    assert "[UNANSWERED_LOOKUP_1]" in result.response
+    assert "[UNANSWERED_EMAIL_BODY_RESULTS]" in result.response
+    assert "[UNANSWERED_EMAIL_BODY_1]" in result.response
+    assert "urgent-001, urgent-002, urgent-003" in result.response
+    assert "matched_email_id: unanswered-001" in result.response
+
+    expected_query = (
+        'in:inbox newer_than:7d (urgent OR asap OR immediately OR important OR critical OR priority OR attention OR '
+        '"high priority" OR "needs attention" OR "for your attention" OR "attention required" OR "requires attention" OR '
+        '"action required" OR "immediate action" OR "response needed" OR "please respond" OR "for your review" OR '
+        '"review needed" OR "time sensitive" OR "urgent response" OR deadline OR overdue OR reminder OR '
+        '"final notice" OR alert OR "security alert")'
+    )
+    assert toolbox.calls[0] == ("search_emails", {"query": expected_query, "max_results": 350})
+    assert toolbox.calls[1] == ("get_unanswered_emails", {"within_days": 7, "max_results": 30})
+    assert toolbox.calls[2] == (
+        "get_email_body",
+        {"email_id": "urgent-001"},
+    )
+    assert toolbox.calls[3] == (
+        "get_email_body",
+        {"email_id": "urgent-002"},
+    )
+    assert toolbox.calls[4] == (
+        "get_email_body",
+        {"email_id": "urgent-003"},
+    )
+    assert toolbox.calls[5] == (
+        "search_emails",
+        {
+            "query": 'in:inbox newer_than:7d from:founder@example.com subject:"urgent deadline update"',
+            "max_results": 1,
+        },
+    )
+    assert toolbox.calls[6:] == [
+        ("get_email_body", {"email_id": "unanswered-001"}),
+    ]
 
 
 def test_skill_selector_validates_and_fills_structured_arguments(tmp_path: Path):
