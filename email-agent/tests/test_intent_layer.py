@@ -343,6 +343,17 @@ class DraftReplyToolBox:
         )
 
 
+class ComposeNewEmailToolBox:
+    def __init__(self):
+        self.calls: list[tuple[str, dict[str, object]]] = []
+        self._lock = threading.Lock()
+
+    def get_my_identity(self) -> str:
+        with self._lock:
+            self.calls.append(("get_my_identity", {}))
+        return "Primary account: Keyvan Zhuo <keyvan@example.com>"
+
+
 def make_noop_skill_finalizer() -> FakeAgent:
     return FakeAgent(['{"final_response":"should not be used","reason":"noop"}'], name="skill-finalizer")
 
@@ -409,7 +420,8 @@ def test_orchestrator_direct_response_skips_main_agent(tmp_path: Path):
             json.dumps(
                 {
                     "intent": "Answer a simple acknowledgement directly.",
-                    "no_execution_confidence": 9,
+                    "intent_category": "meta_chat",
+                    "no_execution_confidence": 9.5,
                     "final_response": "Sure, that works.",
                     "reason": "The user only needs a lightweight confirmation.",
                     "user_update_summary": "No meaningful update.",
@@ -453,6 +465,63 @@ def test_orchestrator_direct_response_skips_main_agent(tmp_path: Path):
     assert len(selector_agent.calls) == 0
 
 
+def test_orchestrator_ignores_direct_response_for_mailbox_mutation_even_at_high_confidence(tmp_path: Path):
+    registry_path = tmp_path / "registry.yaml"
+    registry_path.write_text("skills: []\n", encoding="utf-8")
+
+    main_agent = FakeAgent(["Main agent handled the send request."], name="main-agent", max_iterations=15)
+    intent_agent = FakeAgent(
+        [
+            json.dumps(
+                {
+                    "intent": "Send a new email to the user-provided recipient.",
+                    "intent_category": "mailbox_mutation",
+                    "no_execution_confidence": 10,
+                    "final_response": "I sent the email.",
+                    "reason": "This is an outbound email action.",
+                    "user_update_summary": "No meaningful update.",
+                }
+            )
+        ]
+    )
+    selector_agent = FakeAgent(["should not be called because registry is empty"])
+    writer_agent = FakeAgent(
+        [
+            json.dumps(
+                {
+                    "should_update": False,
+                    "profile_markdown": None,
+                    "habits_markdown": None,
+                    "reason": "Nothing new to store.",
+                }
+            )
+        ]
+    )
+
+    store = MarkdownMemoryStore(
+        profile_path=tmp_path / "USER_PROFILE.md",
+        habits_path=tmp_path / "USER_HABITS.md",
+        writer_agent=writer_agent,
+    )
+    orchestrator = IntentLayerOrchestrator(
+        main_agent=main_agent,
+        intent_agent=intent_agent,
+        skill_selector_agent=selector_agent,
+        skill_finalizer_agent=make_noop_skill_finalizer(),
+        skill_executor=None,
+        memory_store=store,
+        skill_registry_path=registry_path,
+    )
+
+    result = orchestrator.input("Send that email now.")
+
+    assert result == "Main agent handled the send request."
+    assert len(main_agent.calls) == 1
+    handoff_prompt, _, _, _, _ = main_agent.calls[0]
+    assert "intent_category: mailbox_mutation" in handoff_prompt
+    assert "I sent the email." not in handoff_prompt
+
+
 def test_orchestrator_raises_when_intent_layer_llm_output_is_invalid(tmp_path: Path):
     main_agent = FakeAgent(["should not run"], name="main-agent", max_iterations=15)
     intent_agent = FakeAgent(["not json at all"])
@@ -494,6 +563,60 @@ def test_orchestrator_raises_when_intent_layer_llm_output_is_invalid(tmp_path: P
     assert len(main_agent.calls) == 0
 
 
+def test_orchestrator_raises_when_intent_layer_returns_unknown_intent_category(tmp_path: Path):
+    main_agent = FakeAgent(["should not run"], name="main-agent", max_iterations=15)
+    intent_agent = FakeAgent(
+        [
+            json.dumps(
+                {
+                    "intent": "Handle the request.",
+                    "intent_category": "totally_unknown_category",
+                    "no_execution_confidence": 1,
+                    "final_response": None,
+                    "reason": "Bad payload.",
+                    "user_update_summary": "No meaningful update.",
+                }
+            )
+        ]
+    )
+    selector_agent = FakeAgent(["should not run"])
+    writer_agent = FakeAgent(
+        [
+            json.dumps(
+                {
+                    "should_update": False,
+                    "profile_markdown": None,
+                    "habits_markdown": None,
+                    "reason": "Nothing new to store.",
+                }
+            )
+        ]
+    )
+
+    store = MarkdownMemoryStore(
+        profile_path=tmp_path / "USER_PROFILE.md",
+        habits_path=tmp_path / "USER_HABITS.md",
+        writer_agent=writer_agent,
+    )
+    orchestrator = IntentLayerOrchestrator(
+        main_agent=main_agent,
+        intent_agent=intent_agent,
+        skill_selector_agent=selector_agent,
+        skill_finalizer_agent=make_noop_skill_finalizer(),
+        skill_executor=None,
+        memory_store=store,
+        skill_registry_path=tmp_path / "registry.yaml",
+    )
+
+    try:
+        orchestrator.input("Handle this request.")
+        raise AssertionError("Expected IntentLayerError to be raised.")
+    except IntentLayerError as exc:
+        assert "unknown intent_category" in str(exc)
+
+    assert len(main_agent.calls) == 0
+
+
 def test_orchestrator_handoff_to_main_agent_and_updates_user_files(tmp_path: Path):
     registry_path = tmp_path / "registry.yaml"
     registry_path.write_text("skills: []\n", encoding="utf-8")
@@ -504,6 +627,7 @@ def test_orchestrator_handoff_to_main_agent_and_updates_user_files(tmp_path: Pat
             json.dumps(
                 {
                     "intent": "Draft a reply to the user's email request.",
+                    "intent_category": "mailbox_mutation",
                     "no_execution_confidence": 4,
                     "final_response": None,
                     "reason": "The request needs downstream execution.",
@@ -568,6 +692,7 @@ def test_orchestrator_accepts_host_signature_and_forwards_session_payloads(tmp_p
             json.dumps(
                 {
                     "intent": "Handle the request with the main agent.",
+                    "intent_category": "clarification",
                     "no_execution_confidence": 2,
                     "final_response": None,
                     "reason": "Needs downstream execution.",
@@ -621,6 +746,237 @@ def test_orchestrator_accepts_host_signature_and_forwards_session_payloads(tmp_p
     assert forwarded_files == files
 
 
+def test_orchestrator_includes_structured_session_state_in_model_prompts(tmp_path: Path):
+    registry_path = tmp_path / "registry.yaml"
+    registry_path.write_text(
+        "\n".join(
+            [
+                "skills:",
+                "  - name: compose_new_email_draft",
+                "    description: Prepare context to draft a brand-new outbound email.",
+                "    scope: Read-only context collection for new outbound email composition. Never sends.",
+                "    used_tools:",
+                "      - get_my_identity",
+                "    input_schema:",
+                "      recipient:",
+                "        type: string",
+                "        required: true",
+                "        description: Who the new email should be sent to.",
+                "      topic:",
+                "        type: string",
+                "        required: true",
+                "        description: What the new email is about.",
+                "    output: Context bundle.",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    session = {
+        "session_id": "sess-123",
+        "outbound_email_state": {
+            "phase": "draft_ready",
+            "recipient": "keyvan.z.0413@gmail.com",
+            "topic": "Dinner gathering at UNSW next Thursday",
+            "draft_args": {
+                "to": "keyvan.z.0413@gmail.com",
+                "subject": "Dinner gathering at UNSW next Thursday",
+                "body": "Hi Keyvan,\n\nTest.\n",
+                "cc": "",
+                "bcc": "",
+            },
+        },
+    }
+
+    main_agent = FakeAgent(["Main agent handled the send confirmation."], name="main-agent", max_iterations=15)
+    intent_agent = FakeAgent(
+        [
+            json.dumps(
+                {
+                    "intent": "Confirm sending the current draft.",
+                    "intent_category": "mailbox_mutation",
+                    "no_execution_confidence": 4,
+                    "final_response": None,
+                    "reason": "This continues an existing outbound email workflow.",
+                    "user_update_summary": "No meaningful update.",
+                }
+            )
+        ]
+    )
+    selector_agent = FakeAgent(
+        [
+            json.dumps(
+                {
+                    "should_use_skill": False,
+                    "skill_name": None,
+                    "skill_arguments": {},
+                    "reason": "This turn should continue the existing staged draft rather than restart drafting.",
+                }
+            )
+        ]
+    )
+    writer_agent = FakeAgent(
+        [
+            json.dumps(
+                {
+                    "should_update": False,
+                    "profile_markdown": None,
+                    "habits_markdown": None,
+                    "reason": "Nothing new to store.",
+                }
+            )
+        ]
+    )
+
+    store = MarkdownMemoryStore(
+        profile_path=tmp_path / "USER_PROFILE.md",
+        habits_path=tmp_path / "USER_HABITS.md",
+        writer_agent=writer_agent,
+    )
+    orchestrator = IntentLayerOrchestrator(
+        main_agent=main_agent,
+        intent_agent=intent_agent,
+        skill_selector_agent=selector_agent,
+        skill_finalizer_agent=make_noop_skill_finalizer(),
+        skill_executor=None,
+        memory_store=store,
+        skill_registry_path=registry_path,
+    )
+
+    result = orchestrator.input("发送", session=session)
+
+    assert result == "Main agent handled the send confirmation."
+    intent_prompt, _, _, _, _ = intent_agent.calls[0]
+    selector_prompt, _, _, _, _ = selector_agent.calls[0]
+    main_prompt, _, _, _, _ = main_agent.calls[0]
+    assert '"phase": "draft_ready"' in intent_prompt
+    assert '"phase": "draft_ready"' in selector_prompt
+    assert '"phase": "draft_ready"' in main_prompt
+
+
+def test_orchestrator_persists_skill_session_state_updates(tmp_path: Path):
+    registry_path = tmp_path / "registry.yaml"
+    registry_path.write_text(
+        "\n".join(
+            [
+                "skills:",
+                "  - name: compose_new_email_draft",
+                "    description: Prepare context to draft a brand-new outbound email.",
+                "    scope: Read-only context collection for new outbound email composition. Never sends.",
+                "    used_tools:",
+                "      - get_my_identity",
+                "    input_schema:",
+                "      recipient:",
+                "        type: string",
+                "        required: true",
+                "        description: Who the new email should be sent to.",
+                "      topic:",
+                "        type: string",
+                "        required: true",
+                "        description: What the new email is about.",
+                "    output: Clarification question or context bundle.",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    session = {"session_id": "sess-clarify"}
+    main_agent = FakeAgent(["should not run"], name="main-agent", max_iterations=15)
+    intent_agent = FakeAgent(
+        [
+            json.dumps(
+                {
+                    "intent": "Collect missing details for a new outbound email.",
+                    "intent_category": "mailbox_mutation",
+                    "no_execution_confidence": 2,
+                    "final_response": None,
+                    "reason": "This needs the drafting workflow.",
+                    "user_update_summary": "No meaningful update.",
+                }
+            )
+        ]
+    )
+    selector_agent = FakeAgent(
+        [
+            json.dumps(
+                {
+                    "should_use_skill": True,
+                    "skill_name": "compose_new_email_draft",
+                    "skill_arguments": {
+                        "recipient": "keyvan.z.0413@gmail.com",
+                        "topic": "Dinner gathering at UNSW next Thursday",
+                    },
+                    "reason": "This starts a new outbound email workflow.",
+                }
+            )
+        ]
+    )
+    skill_finalizer_agent = FakeAgent(
+        [
+            json.dumps(
+                {
+                    "final_response": "Before I draft the email, what key points should I include?",
+                    "reason": "The skill already produced a user-facing clarification question.",
+                }
+            )
+        ],
+        name="skill-finalizer",
+    )
+    writer_agent = FakeAgent(
+        [
+            json.dumps(
+                {
+                    "should_update": False,
+                    "profile_markdown": None,
+                    "habits_markdown": None,
+                    "reason": "Nothing new to store.",
+                }
+            )
+        ]
+    )
+    skill_executor = FakeSkillExecutor(
+        SkillExecutionResult(
+            attempted=True,
+            completed=True,
+            response="Before I draft the email, what key points should I include?",
+            reason="Need user-provided key points before drafting.",
+            session_state_update={
+                "outbound_email_state": {
+                    "phase": "collecting_details",
+                    "recipient": "keyvan.z.0413@gmail.com",
+                    "topic": "Dinner gathering at UNSW next Thursday",
+                }
+            },
+        )
+    )
+
+    store = MarkdownMemoryStore(
+        profile_path=tmp_path / "USER_PROFILE.md",
+        habits_path=tmp_path / "USER_HABITS.md",
+        writer_agent=writer_agent,
+    )
+    orchestrator = IntentLayerOrchestrator(
+        main_agent=main_agent,
+        intent_agent=intent_agent,
+        skill_selector_agent=selector_agent,
+        skill_finalizer_agent=skill_finalizer_agent,
+        skill_executor=skill_executor,
+        memory_store=store,
+        skill_registry_path=registry_path,
+    )
+
+    result = orchestrator.input("给 Keyvan 发封关于下周活动的邮件", session=session)
+
+    assert result == "Before I draft the email, what key points should I include?"
+    assert session["outbound_email_state"] == {
+        "phase": "collecting_details",
+        "recipient": "keyvan.z.0413@gmail.com",
+        "topic": "Dinner gathering at UNSW next Thursday",
+    }
+
+
 def test_orchestrator_persists_dialogue_across_new_session_dicts_with_same_session_id(tmp_path: Path):
     registry_path = tmp_path / "registry.yaml"
     registry_path.write_text("skills: []\n", encoding="utf-8")
@@ -641,6 +997,7 @@ def test_orchestrator_persists_dialogue_across_new_session_dicts_with_same_sessi
             json.dumps(
                 {
                     "intent": "Handle the first request with the main agent.",
+                    "intent_category": "clarification",
                     "no_execution_confidence": 2,
                     "final_response": None,
                     "reason": "Needs downstream execution.",
@@ -650,6 +1007,7 @@ def test_orchestrator_persists_dialogue_across_new_session_dicts_with_same_sessi
             json.dumps(
                 {
                     "intent": "Handle the follow-up request with the main agent.",
+                    "intent_category": "clarification",
                     "no_execution_confidence": 2,
                     "final_response": None,
                     "reason": "Needs downstream execution.",
@@ -716,6 +1074,7 @@ def test_orchestrator_logs_confidence_for_non_direct_routes(tmp_path: Path):
             json.dumps(
                 {
                     "intent": "Handle this request with downstream execution.",
+                    "intent_category": "clarification",
                     "no_execution_confidence": 3,
                     "final_response": None,
                     "reason": "Needs tools.",
@@ -791,6 +1150,7 @@ def test_orchestrator_returns_selected_skill_response_without_main_agent(tmp_pat
             json.dumps(
                 {
                     "intent": "Draft an email reply from existing mailbox context.",
+                    "intent_category": "mailbox_mutation",
                     "no_execution_confidence": 3,
                     "final_response": None,
                     "reason": "This needs a drafting workflow.",
@@ -907,6 +1267,7 @@ def test_orchestrator_raises_when_skill_finalizer_llm_output_is_invalid(tmp_path
             json.dumps(
                 {
                     "intent": "Draft an email reply from existing mailbox context.",
+                    "intent_category": "mailbox_mutation",
                     "no_execution_confidence": 3,
                     "final_response": None,
                     "reason": "This needs a drafting workflow.",
@@ -997,6 +1358,7 @@ def test_orchestrator_falls_back_to_main_agent_when_skill_cannot_complete(tmp_pa
             json.dumps(
                 {
                     "intent": "Draft an email reply from existing mailbox context.",
+                    "intent_category": "mailbox_mutation",
                     "no_execution_confidence": 2,
                     "final_response": None,
                     "reason": "This needs downstream execution.",
@@ -1033,7 +1395,7 @@ def test_orchestrator_falls_back_to_main_agent_when_skill_cannot_complete(tmp_pa
         SkillExecutionResult(
             attempted=True,
             completed=False,
-            response=None,
+            response="[COMPOSE_NEW_EMAIL_DRAFT_BUNDLE]\nrecipient: client@example.com\nsubject_hint: Project update",
             reason="The restricted skill lacked enough mailbox context to finish.",
         )
     )
@@ -1062,6 +1424,8 @@ def test_orchestrator_falls_back_to_main_agent_when_skill_cannot_complete(tmp_pa
     assert 'skill_selector_arguments: {}' in handoff_prompt
     assert "skill_completed: False" in handoff_prompt
     assert "The restricted skill lacked enough mailbox context to finish." in handoff_prompt
+    assert "[SKILL_PREPARATION_CONTEXT]" in handoff_prompt
+    assert "recipient: client@example.com" in handoff_prompt
 
 
 def test_orchestrator_raises_when_skill_selector_llm_output_is_invalid(tmp_path: Path):
@@ -1088,6 +1452,7 @@ def test_orchestrator_raises_when_skill_selector_llm_output_is_invalid(tmp_path:
             json.dumps(
                 {
                     "intent": "Draft an email reply from existing mailbox context.",
+                    "intent_category": "mailbox_mutation",
                     "no_execution_confidence": 2,
                     "final_response": None,
                     "reason": "This needs downstream execution.",
@@ -1855,6 +2220,151 @@ def test_draft_reply_from_email_context_uses_search_query_workflow(repo_root: Pa
     assert len(toolbox.calls) == 2
 
 
+def test_compose_new_email_draft_skill_prepares_bundle_for_main_agent(repo_root: Path | None = None):
+    del repo_root
+    toolbox = ComposeNewEmailToolBox()
+    tool_function_map = build_tool_function_map([toolbox])
+    skills_directory = Path(__file__).resolve().parent.parent / "skills"
+    writing_style_path = skills_directory.parent / "test_tmp_writing_style_new_email.md"
+    writing_style_path.write_text(
+        "# Writing Style\n\n- Friendly, concise, and practical.\n- Close with a short next step.\n",
+        encoding="utf-8",
+    )
+
+    try:
+        executor = PythonSkillExecutor(
+            skills_directory=skills_directory,
+            tool_function_map=tool_function_map,
+            skill_runtime={
+                "paths": {
+                    "writing_style_markdown": writing_style_path,
+                },
+            },
+        )
+
+        result = executor.run(
+            SkillSpec(
+                name="compose_new_email_draft",
+                description="Prepare context to draft a brand-new outbound email.",
+                scope="Read-only context collection for new outbound email composition. Never sends.",
+                used_tools=("get_my_identity",),
+                output="A context bundle containing recipient, topic, key points, writing style markdown, and sender identity.",
+                input_schema=(
+                    SkillInputFieldSpec(
+                        name="recipient",
+                        field_type="string",
+                        required=True,
+                        description="Who the new email should be sent to.",
+                    ),
+                    SkillInputFieldSpec(
+                        name="topic",
+                        field_type="string",
+                        required=True,
+                        description="What the new email is about.",
+                    ),
+                    SkillInputFieldSpec(
+                        name="key_points",
+                        field_type="string",
+                        required=False,
+                        description="Specific details to include in the email.",
+                    ),
+                ),
+            ),
+            skill_arguments={
+                "recipient": "alice@example.com",
+                "topic": "Outdoor activity next weekend",
+                "key_points": "Ask whether Saturday morning works and mention hiking plus brunch.",
+            },
+            current_message="给 Alice 发封关于下周末户外活动的新邮件",
+            intent_decision=type(
+                "IntentDecisionLike",
+                (),
+                {"intent": "用户想让我起草一封新的外发邮件。"},
+            )(),
+            recent_context=[],
+        )
+    finally:
+        if writing_style_path.exists():
+            writing_style_path.unlink()
+
+    assert result.completed is False
+    assert result.response is not None
+    assert "[COMPOSE_NEW_EMAIL_DRAFT_BUNDLE]" in result.response
+    assert "recipient: alice@example.com" in result.response
+    assert "topic: Outdoor activity next weekend" in result.response
+    assert "Friendly, concise, and practical." in result.response
+    assert "Primary account: Keyvan Zhuo <keyvan@example.com>" in result.response
+    assert "Call the send tool" in result.response
+    assert toolbox.calls == [("get_my_identity", {})]
+
+
+def test_compose_new_email_draft_skill_asks_for_key_points_when_missing(repo_root: Path | None = None):
+    del repo_root
+    toolbox = ComposeNewEmailToolBox()
+    tool_function_map = build_tool_function_map([toolbox])
+    skills_directory = Path(__file__).resolve().parent.parent / "skills"
+
+    executor = PythonSkillExecutor(
+        skills_directory=skills_directory,
+        tool_function_map=tool_function_map,
+    )
+
+    result = executor.run(
+        SkillSpec(
+            name="compose_new_email_draft",
+            description="Prepare context to draft a brand-new outbound email.",
+            scope="Read-only context collection for new outbound email composition. Never sends.",
+            used_tools=("get_my_identity",),
+            output="Either ask for missing key points or return a context bundle for the main agent.",
+            input_schema=(
+                SkillInputFieldSpec(
+                    name="recipient",
+                    field_type="string",
+                    required=True,
+                    description="Who the new email should be sent to.",
+                ),
+                SkillInputFieldSpec(
+                    name="topic",
+                    field_type="string",
+                    required=True,
+                    description="What the new email is about.",
+                ),
+                SkillInputFieldSpec(
+                    name="key_points",
+                    field_type="string",
+                    required=False,
+                    description="Specific details to include in the email.",
+                ),
+            ),
+        ),
+        skill_arguments={
+            "recipient": "alice@example.com",
+            "topic": "Outdoor activity next weekend",
+        },
+        current_message="给 Alice 发封关于下周末户外活动的新邮件",
+        intent_decision=type(
+            "IntentDecisionLike",
+            (),
+            {"intent": "用户想让我起草一封新的外发邮件。"},
+        )(),
+        recent_context=[],
+    )
+
+    assert result.completed is True
+    assert result.response is not None
+    assert "alice@example.com" in result.response
+    assert "Outdoor activity next weekend" in result.response
+    assert "what key points should I include" in result.response
+    assert toolbox.calls == []
+    assert result.session_state_update == {
+        "outbound_email_state": {
+            "phase": "collecting_details",
+            "recipient": "alice@example.com",
+            "topic": "Outdoor activity next weekend",
+        }
+    }
+
+
 def test_skill_selector_validates_and_fills_structured_arguments(tmp_path: Path):
     registry_path = tmp_path / "registry.yaml"
     registry_path.write_text(
@@ -1890,6 +2400,7 @@ def test_skill_selector_validates_and_fills_structured_arguments(tmp_path: Path)
             json.dumps(
                 {
                     "intent": "Summarize recent inbox activity.",
+                    "intent_category": "mailbox_query",
                     "no_execution_confidence": 2,
                     "final_response": None,
                     "reason": "This needs downstream execution.",
@@ -1994,6 +2505,7 @@ def test_skill_selector_rejects_unknown_structured_arguments(tmp_path: Path):
             json.dumps(
                 {
                     "intent": "Summarize recent inbox activity.",
+                    "intent_category": "mailbox_query",
                     "no_execution_confidence": 2,
                     "final_response": None,
                     "reason": "This needs downstream execution.",

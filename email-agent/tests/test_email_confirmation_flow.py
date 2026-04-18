@@ -77,8 +77,8 @@ def test_agent_refreshes_system_prompt_before_each_input(monkeypatch):
 
     monkeypatch.setattr(agent_module.Agent, "input", fake_agent_input)
 
-    assert agent_module.agent.input("first") == "ok"
-    assert agent_module.agent.input("second") == "ok"
+    assert agent_module.main_agent.input("first") == "ok"
+    assert agent_module.main_agent.input("second") == "ok"
     assert seen_prompts == [
         "The sender's name is: First Sender",
         "The sender's name is: Second Sender",
@@ -121,8 +121,11 @@ def test_send_stages_draft_before_sending(monkeypatch):
     assert "[你的名字]" not in result
     assert "Next step:" not in result
     assert agent.current_session["gmail_pending_draft"]["tool_name"] == "send"
+    assert agent.current_session["outbound_email_state"]["phase"] == "draft_ready"
+    assert agent.current_session["outbound_email_state"]["recipient"] == "xhy413604@gmail.com"
+    assert agent.current_session["outbound_email_state"]["topic"] == "关于下周四的汇报"
     assert agent.current_session["halt_turn"] is True
-    assert "直接确认发送" in agent.current_session["result_override"]
+    assert agent.current_session["result_override"] == result
 
 
 def test_send_requires_later_turn_confirmation(monkeypatch):
@@ -164,6 +167,7 @@ def test_send_requires_later_turn_confirmation(monkeypatch):
     assert calls == [("xhy413604@gmail.com", "关于下周四的汇报", "你好，想确认一下下周四的汇报安排。", None, None)]
     assert result == "Reply sent successfully. Message ID: 123"
     assert "gmail_pending_draft" not in agent.current_session
+    assert "outbound_email_state" not in agent.current_session
     assert agent.current_session["stop_signal"] is True
     assert "Reply sent successfully. Message ID: 123" in agent.current_session["result_override"]
     assert "继续处理别的事情" in agent.current_session["result_override"]
@@ -208,6 +212,7 @@ def test_send_can_be_cancelled_by_llm_intent(monkeypatch):
     assert calls == []
     assert result == "Canceled the pending email draft. No email was sent."
     assert "gmail_pending_draft" not in agent.current_session
+    assert "outbound_email_state" not in agent.current_session
 
 
 def test_send_bypasses_conversational_confirmation_after_plugin_approval(monkeypatch):
@@ -286,6 +291,7 @@ def test_send_uses_trace_to_restore_pending_draft_across_http_turns(monkeypatch)
 
     assert calls == [("keyvan.z.0413@gmail.com", "Quick Check-In", "Hi Keyvan,\n\nTest.\n", None, None)]
     assert result == "Email sent successfully. Message ID: abc123"
+    assert "outbound_email_state" not in restored_agent.current_session
 
 
 def test_send_confirmation_uses_pending_cleaned_draft_even_if_current_args_differ(monkeypatch):
@@ -341,6 +347,7 @@ def test_send_confirmation_uses_pending_cleaned_draft_even_if_current_args_diffe
         )
     ]
     assert "gmail_pending_draft" not in agent.current_session
+    assert "outbound_email_state" not in agent.current_session
     assert agent.current_session["stop_signal"] is True
 
 
@@ -384,6 +391,7 @@ def test_send_failure_returns_failure_message_and_keeps_pending_draft(monkeypatc
         raise AssertionError("send should raise when Gmail send fails")
 
     assert agent.current_session["gmail_pending_draft"]["tool_name"] == "send"
+    assert agent.current_session["outbound_email_state"]["phase"] == "draft_ready"
     assert agent.current_session["stop_signal"] is True
     assert "邮件发送失败" in agent.current_session["result_override"]
     assert "草稿已保留" in agent.current_session["result_override"]
@@ -398,7 +406,7 @@ def test_agent_background_cancellation_clears_pending_draft(monkeypatch):
         lambda *args, **kwargs: agent_module.PendingEmailIntent(intent="cancel_send"),
     )
 
-    agent = agent_module.agent
+    agent = agent_module.main_agent
     agent.current_session = {
         "messages": [
             {"role": "system", "content": "prompts/gmail_agent.md"},
@@ -427,6 +435,7 @@ def test_agent_background_cancellation_clears_pending_draft(monkeypatch):
 
     assert result == "Canceled the pending email draft. No email was sent."
     assert "gmail_pending_draft" not in agent.current_session
+    assert "outbound_email_state" not in agent.current_session
 
 
 def test_agent_background_confirmation_sends_pending_draft(monkeypatch):
@@ -445,7 +454,7 @@ def test_agent_background_confirmation_sends_pending_draft(monkeypatch):
         lambda agent, pending: delivered.append(pending) or "Email sent successfully. Message ID: host123",
     )
 
-    agent = agent_module.agent
+    agent = agent_module.main_agent
     agent.current_session = {
         "messages": [
             {"role": "system", "content": "prompts/gmail_agent.md"},
@@ -487,3 +496,4 @@ def test_agent_background_confirmation_sends_pending_draft(monkeypatch):
         }
     ]
     assert "gmail_pending_draft" not in agent.current_session
+    assert "outbound_email_state" not in agent.current_session

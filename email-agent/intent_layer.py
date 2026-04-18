@@ -15,6 +15,23 @@ OLDER_CONTEXT_LIMIT = 40
 RECENT_CONTEXT_LIMIT = 10
 DIRECT_RESPONSE_THRESHOLD = 9.0
 
+VALID_INTENT_CATEGORIES = frozenset({
+    "meta_chat",
+    "clarification",
+    "mailbox_query",
+    "mailbox_mutation",
+    "calendar_query",
+    "calendar_mutation",
+    "profile_statement",
+})
+
+# Hard-coded allow-list. Only these categories may short-circuit to
+# direct_response. Any category outside this set - even with high confidence -
+# must route through the skill selector / main agent so tools and approval
+# plugins run. This is the structural guard that prevents the intent layer
+# from fabricating "done" responses for mutations or state-dependent queries.
+DIRECT_RESPONSE_CATEGORIES = frozenset({"meta_chat", "clarification"})
+
 DEFAULT_USER_PROFILE = """# User Profile
 
 - No confirmed profile details yet.
@@ -68,10 +85,15 @@ class IntentDecision:
     final_response: str | None
     reason: str
     user_update_summary: str
+    intent_category: str = "meta_chat"
 
     @property
     def should_direct_respond(self) -> bool:
-        return self.no_execution_confidence > DIRECT_RESPONSE_THRESHOLD and bool(self.final_response)
+        return (
+            self.intent_category in DIRECT_RESPONSE_CATEGORIES
+            and self.no_execution_confidence > DIRECT_RESPONSE_THRESHOLD
+            and bool(self.final_response)
+        )
 
 
 @dataclass(frozen=True)
@@ -116,6 +138,7 @@ class SkillExecutionResult:
     completed: bool
     response: str | None
     reason: str
+    session_state_update: dict[str, Any] | None = None
 
 
 class SupportsSkillExecution(Protocol):
@@ -201,6 +224,12 @@ def format_context(items: list[DialogueItem]) -> str:
     if not items:
         return "(empty)"
     return "\n".join(item.as_context_line() for item in items)
+
+
+def format_session_state(state: dict[str, Any] | None) -> str:
+    if not isinstance(state, dict) or not state:
+        return "(empty)"
+    return json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True)
 
 
 def _parse_scalar(raw_value: str) -> str:
@@ -719,23 +748,33 @@ class PythonSkillExecutor:
         response_raw = payload.get("response")
         response = None if response_raw is None else str(response_raw).strip()
         reason = _require_non_empty_string(payload.get("reason"), field_name="reason", error_type=SkillLayerError)
+        session_state_update_raw = payload.get("session_state_update")
+        session_state_update = None
+        if session_state_update_raw is not None:
+            if not isinstance(session_state_update_raw, dict):
+                raise SkillLayerError(
+                    f"Skill '{skill_spec.name}' returned session_state_update that is not a dict."
+                )
+            session_state_update = copy.deepcopy(session_state_update_raw)
 
         if completed and not response:
             raise SkillLayerError(f"Skill '{skill_spec.name}' returned completed=true without a response.")
 
-        if not completed or not response:
+        if not response:
             return SkillExecutionResult(
                 attempted=True,
                 completed=False,
                 response=None,
                 reason=reason,
+                session_state_update=session_state_update,
             )
 
         return SkillExecutionResult(
             attempted=True,
-            completed=True,
+            completed=completed,
             response=response,
             reason=reason,
+            session_state_update=session_state_update,
         )
 
     def _load_execute_skill(self, skill_spec: SkillSpec) -> Callable[..., Any]:
@@ -810,6 +849,7 @@ class IntentLayerOrchestrator:
                 self.current_session = session
             dialogue_store = self._get_dialogue_store()
             older_context, recent_context = split_context(self._deserialize_dialogue(dialogue_store))
+            current_session_state = self._session_state_for_models()
             profile_markdown = self._memory_store.read_profile()
             habits_markdown = self._memory_store.read_habits()
 
@@ -817,6 +857,7 @@ class IntentLayerOrchestrator:
                 current_message=prompt,
                 older_context=older_context,
                 recent_context=recent_context,
+                current_session_state=current_session_state,
                 profile_markdown=profile_markdown,
                 habits_markdown=habits_markdown,
             )
@@ -835,6 +876,7 @@ class IntentLayerOrchestrator:
                     intent_decision=intent_decision,
                     current_message=prompt,
                     recent_context=recent_context,
+                    current_session_state=current_session_state,
                     available_skills=available_skills,
                 )
                 self._log_route(
@@ -875,6 +917,8 @@ class IntentLayerOrchestrator:
                             completed=skill_execution_result.completed,
                             reason=skill_execution_result.reason,
                         )
+                        self._apply_session_state_update(skill_execution_result.session_state_update)
+                        current_session_state = self._session_state_for_models()
 
                 if (
                     skill_spec is not None
@@ -916,6 +960,7 @@ class IntentLayerOrchestrator:
                         user_message=prompt,
                         intent_decision=intent_decision,
                         recent_context=recent_context,
+                        current_session_state=current_session_state,
                         skill_selection=selection,
                         skill_execution_result=skill_execution_result,
                         max_iterations=max_iterations,
@@ -1006,6 +1051,60 @@ class IntentLayerOrchestrator:
 
         return None
 
+    def _session_state_for_models(self) -> dict[str, Any] | None:
+        current_session = self._resolve_current_session()
+        if not isinstance(current_session, dict):
+            return None
+
+        outbound_email_state = current_session.get("outbound_email_state")
+        if not isinstance(outbound_email_state, dict):
+            pending_draft = current_session.get("gmail_pending_draft")
+            if not isinstance(pending_draft, dict):
+                trace = current_session.get("trace", [])
+                pending_draft = None
+                if isinstance(trace, list):
+                    for entry in reversed(trace):
+                        if not isinstance(entry, dict):
+                            continue
+                        entry_type = str(entry.get("type") or "").strip()
+                        if entry_type == "email_draft_cleared":
+                            break
+                        if entry_type == "email_draft_pending" and str(entry.get("tool_name") or "").strip() == "send":
+                            pending_draft = {
+                                "tool_name": "send",
+                                "args": entry.get("args", {}),
+                            }
+                            break
+            if isinstance(pending_draft, dict) and str(pending_draft.get("tool_name") or "").strip() == "send":
+                draft_args = pending_draft.get("args", {})
+                if isinstance(draft_args, dict):
+                    outbound_email_state = {
+                        "phase": "draft_ready",
+                        "recipient": str(draft_args.get("to") or "").strip(),
+                        "topic": str(draft_args.get("subject") or "").strip(),
+                        "draft_args": copy.deepcopy(draft_args),
+                    }
+                    current_session["outbound_email_state"] = outbound_email_state
+
+        if not isinstance(outbound_email_state, dict):
+            return None
+
+        return {"outbound_email_state": copy.deepcopy(outbound_email_state)}
+
+    def _apply_session_state_update(self, session_state_update: dict[str, Any] | None) -> None:
+        if not session_state_update:
+            return
+
+        current_session = self._resolve_current_session()
+        if not isinstance(current_session, dict):
+            return
+
+        for key, value in session_state_update.items():
+            if value is None:
+                current_session.pop(key, None)
+            else:
+                current_session[key] = copy.deepcopy(value)
+
     @staticmethod
     def _deserialize_dialogue(raw_items: list[dict[str, str]]) -> list[DialogueItem]:
         dialogue_items: list[DialogueItem] = []
@@ -1024,6 +1123,7 @@ class IntentLayerOrchestrator:
         current_message: str,
         older_context: list[DialogueItem],
         recent_context: list[DialogueItem],
+        current_session_state: dict[str, Any] | None,
         profile_markdown: str,
         habits_markdown: str,
     ) -> IntentDecision:
@@ -1035,6 +1135,8 @@ class IntentLayerOrchestrator:
                 format_context(older_context),
                 "[RECENT_CONTEXT]",
                 format_context(recent_context),
+                "[CURRENT_SESSION_STATE]",
+                format_session_state(current_session_state),
                 "[USER_PROFILE]",
                 profile_markdown,
                 "[USER_HABITS]",
@@ -1056,18 +1158,36 @@ class IntentLayerOrchestrator:
         if confidence < 0 or confidence > 10:
             raise IntentLayerError("Intent layer returned no_execution_confidence outside the 0-10 range.")
 
+        intent_category = _require_non_empty_string(
+            payload.get("intent_category"),
+            field_name="intent_category",
+            error_type=IntentLayerError,
+        )
+        if intent_category not in VALID_INTENT_CATEGORIES:
+            raise IntentLayerError(
+                f"Intent layer returned unknown intent_category={intent_category!r}. "
+                f"Must be one of: {sorted(VALID_INTENT_CATEGORIES)}."
+            )
+
         final_response_raw = payload.get("final_response")
         final_response = None if final_response_raw is None else str(final_response_raw).strip()
-        if confidence > DIRECT_RESPONSE_THRESHOLD and not final_response:
-            raise IntentLayerError("Intent layer returned no_execution_confidence > 9.0 without a final_response.")
-        if confidence <= DIRECT_RESPONSE_THRESHOLD and final_response is not None:
-            raise IntentLayerError("Intent layer returned final_response even though no_execution_confidence <= 9.0.")
-        if confidence <= DIRECT_RESPONSE_THRESHOLD:
+
+        category_allows_direct = intent_category in DIRECT_RESPONSE_CATEGORIES
+        if category_allows_direct and confidence > DIRECT_RESPONSE_THRESHOLD and not final_response:
+            raise IntentLayerError(
+                "Intent layer returned a direct-response-eligible category "
+                f"({intent_category!r}) with no_execution_confidence > 9.0 but no final_response."
+            )
+        # Any category outside the direct-response allow-list forces final_response to be dropped,
+        # even if the LLM included one. This is the structural guard that prevents mutations
+        # or state-dependent queries from being answered without tool execution.
+        if not category_allows_direct or confidence <= DIRECT_RESPONSE_THRESHOLD:
             final_response = None
 
         return IntentDecision(
             intent=intent,
             no_execution_confidence=confidence,
+            intent_category=intent_category,
             final_response=final_response,
             reason=_require_non_empty_string(payload.get("reason"), field_name="reason", error_type=IntentLayerError),
             user_update_summary=str(payload.get("user_update_summary") or "").strip(),
@@ -1079,6 +1199,7 @@ class IntentLayerOrchestrator:
         intent_decision: IntentDecision,
         current_message: str,
         recent_context: list[DialogueItem],
+        current_session_state: dict[str, Any] | None,
         available_skills: list[SkillSpec],
     ) -> SkillSelection:
         if not available_skills:
@@ -1108,7 +1229,7 @@ class IntentLayerOrchestrator:
                 "[RECENT_CONTEXT]",
                 format_context(recent_context),
                 "[CURRENT_SESSION_STATE]",
-                "No explicit session state is available in this implementation.",
+                format_session_state(current_session_state),
                 "[AVAILABLE_SKILLS]",
                 "\n\n".join(skills_block),
             ]
@@ -1218,6 +1339,7 @@ class IntentLayerOrchestrator:
         user_message: str,
         intent_decision: IntentDecision,
         recent_context: list[DialogueItem],
+        current_session_state: dict[str, Any] | None,
         skill_selection: SkillSelection,
         skill_execution_result: SkillExecutionResult | None,
         max_iterations: int | None,
@@ -1228,6 +1350,7 @@ class IntentLayerOrchestrator:
         handoff_sections = [
             "[INTENT_LAYER_HANDOFF]",
             f"intent: {intent_decision.intent}",
+            f"intent_category: {intent_decision.intent_category}",
             f"reason: {intent_decision.reason or 'No reason provided.'}",
             f"no_execution_confidence: {intent_decision.no_execution_confidence}",
             f"skill_selector: {'use ' + skill_selection.skill_name if skill_selection.should_use_skill and skill_selection.skill_name else 'route to main agent'}",
@@ -1242,8 +1365,19 @@ class IntentLayerOrchestrator:
                     f"skill_execution_reason: {skill_execution_result.reason}",
                 ]
             )
+        if skill_execution_result is not None and skill_execution_result.response:
+            handoff_sections.extend(
+                [
+                    "",
+                    "[SKILL_PREPARATION_CONTEXT]",
+                    skill_execution_result.response,
+                ]
+            )
         handoff_sections.extend(
             [
+                "",
+                "[CURRENT_SESSION_STATE]",
+                format_session_state(current_session_state),
                 "",
                 "[RECENT_CONTEXT]",
                 format_context(recent_context),

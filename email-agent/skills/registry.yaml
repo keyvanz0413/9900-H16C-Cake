@@ -84,6 +84,25 @@ skills:
         default: 7
         description: Number of recent days to inspect for candidate, application, or resume-related emails, capped at 7.
     output: A user-facing structured candidate review grounded only in the search hits, attachment listings, and any extracted attachment text from matched candidate emails.
+  - name: compose_new_email_draft
+    description: Prepare context to draft a BRAND-NEW outbound email (a new thread, not a reply to an existing email). Use this when the user wants to send an email to someone without any existing mailbox thread to anchor on - for example, "send an email to Alice about the meeting next week", "write a new email to the team announcing X", "draft a cold email to bob@example.com". DO NOT use this for replying to an existing email in the inbox - use draft_reply_from_email_context for that.
+    scope: Read-only context collection for NEW outbound email composition. Never sends. Never modifies mailbox state. Only reads the local WRITING_STYLE.md file and the sender identity. The main agent is responsible for composing the body and calling the send tool, which the Gmail approval plugin will stage for user confirmation.
+    used_tools:
+      - get_my_identity
+    input_schema:
+      recipient:
+        type: string
+        required: true
+        description: Email address or name of the person to send the new email to. Prefer an email address if the user provided one.
+      topic:
+        type: string
+        required: true
+        description: One-sentence description of what the email is about. Will be used by the main agent to derive the subject and body.
+      key_points:
+        type: string
+        required: false
+        description: Specific facts or asks the user wants included in the email - time, location, question, deadline, attachments to mention, etc. If empty, the skill should ask the user for these key points before any draft is prepared.
+    output: Either a user-facing clarification question asking for missing key points, or a context bundle containing recipient, topic, key points, writing style markdown, and sender identity. When key points are present, the main agent composes the body and calls the send tool, triggering the Gmail approval plugin's staging + confirmation flow. The user will see the staged draft and must explicitly confirm before it leaves the outbox.
   - name: draft_reply_from_email_context
     description: Locate a target email either by unanswered-message rank or by a mailbox search query, then fetch the target email body so the outer layer can draft a reply.
     scope: Draft-only reply workflow. Never send email and never modify mailbox state.

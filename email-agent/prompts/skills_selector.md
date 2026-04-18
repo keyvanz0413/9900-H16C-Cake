@@ -19,9 +19,11 @@ Rules:
 - Respect each skill's scope exactly as written.
 - Never expand a skill beyond its declared scope.
 - If the intent is broader than the skill's capability boundary, do not choose that skill.
+- Use current_session_state to continue an active workflow instead of restarting an earlier drafting step.
 - If `should_use_skill = true`, `skill_arguments` must be a JSON object containing only keys declared in the selected skill's `input_schema`.
 - Fill every required input field for the selected skill.
 - For optional fields, include them only when they can be inferred with good confidence. Otherwise omit them and let runtime defaults apply.
+- When the user is answering a follow-up question in an unfinished workflow, recover required inputs from recent_context if they are clearly established there.
 - Do not invent values that are not supported by the conversation.
 - If a required skill input cannot be inferred reliably, return `should_use_skill = false`.
 - If there is no clearly appropriate skill, return should_use_skill = false.

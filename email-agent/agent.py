@@ -154,12 +154,47 @@ def _normalize_email_args(tool_name: str, args: dict) -> dict:
     }
 
 
+def _build_outbound_email_state_from_pending(pending: dict | None) -> dict | None:
+    if not pending or pending.get("tool_name") != "send":
+        return None
+
+    draft_args = _normalize_email_args("send", pending.get("args", {}))
+    return {
+        "phase": "draft_ready",
+        "recipient": draft_args.get("to", ""),
+        "topic": draft_args.get("subject", ""),
+        "draft_args": draft_args,
+    }
+
+
+def _current_session_dict(agent) -> dict | None:
+    session = getattr(agent, "current_session", None)
+    return session if isinstance(session, dict) else None
+
+
+def _sync_outbound_email_state_from_pending(agent, pending: dict | None) -> None:
+    session = _current_session_dict(agent)
+    if session is None:
+        return
+
+    state = _build_outbound_email_state_from_pending(pending)
+    if state is None:
+        return
+
+    session["outbound_email_state"] = state
+
+
 def _get_pending_email(agent) -> dict | None:
-    pending = agent.current_session.get("gmail_pending_draft")
+    session = _current_session_dict(agent)
+    if session is None:
+        return None
+
+    pending = session.get("gmail_pending_draft")
     if pending:
+        _sync_outbound_email_state_from_pending(agent, pending)
         return pending
 
-    trace = agent.current_session.get("trace", [])
+    trace = session.get("trace", [])
     for entry in reversed(trace):
         entry_type = entry.get("type")
         if entry_type == "email_draft_cleared":
@@ -170,29 +205,39 @@ def _get_pending_email(agent) -> dict | None:
                 "args": entry.get("args", {}),
                 "turn": entry.get("turn"),
             }
-            agent.current_session["gmail_pending_draft"] = pending
+            session["gmail_pending_draft"] = pending
+            _sync_outbound_email_state_from_pending(agent, pending)
             return pending
 
     return None
 
 
 def _record_pending_email(agent, tool_name: str, args: dict) -> None:
+    session = _current_session_dict(agent)
+    if session is None:
+        return
+
     if hasattr(agent, "_record_trace"):
         agent._record_trace({
             "type": "email_draft_pending",
             "tool_name": tool_name,
             "args": dict(args),
-            "turn": agent.current_session.get("turn"),
+            "turn": session.get("turn"),
         })
 
 
 def _clear_pending_email(agent, reason: str) -> None:
-    agent.current_session.pop("gmail_pending_draft", None)
+    session = _current_session_dict(agent)
+    if session is None:
+        return
+
+    session.pop("gmail_pending_draft", None)
+    session.pop("outbound_email_state", None)
     if hasattr(agent, "_record_trace"):
         agent._record_trace({
             "type": "email_draft_cleared",
             "reason": reason,
-            "turn": agent.current_session.get("turn"),
+            "turn": session.get("turn"),
         })
 
 
@@ -586,6 +631,9 @@ class OpenAICompatibleGmailMixin:
             "args": normalized_args,
             "turn": agent.current_session.get("turn"),
         }
+        outbound_state = _build_outbound_email_state_from_pending(agent.current_session["gmail_pending_draft"])
+        if outbound_state is not None:
+            agent.current_session["outbound_email_state"] = outbound_state
         _record_pending_email(agent, tool_name, normalized_args)
         return self._pause_for_confirmation(
             agent,
