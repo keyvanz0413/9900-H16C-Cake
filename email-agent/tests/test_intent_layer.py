@@ -173,6 +173,41 @@ class UrgentEmailToolBox:
         return f"Email body for {email_id}"
 
 
+class BugIssueToolBox:
+    def __init__(self):
+        self.calls: list[tuple[str, dict[str, object]]] = []
+        self._lock = threading.Lock()
+
+    def _record(self, tool_name: str, **kwargs: object) -> None:
+        with self._lock:
+            self.calls.append((tool_name, kwargs))
+
+    def search_emails(self, query: str, max_results: int = 10) -> str:
+        self._record("search_emails", query=query, max_results=max_results)
+        return (
+            "Found 3 email(s):\n\n"
+            "1. [UNREAD] From: CI Bot <ci@example.com>\n"
+            "   Subject: build failed on main\n"
+            "   Date: Fri, 18 Apr 2026 09:15:00 +0000\n"
+            "   Preview: The latest pipeline failed on the test stage...\n"
+            "   ID: bug-001\n\n"
+            "2. [UNREAD] From: GitHub <noreply@github.com>\n"
+            "   Subject: issue opened: checkout regression\n"
+            "   Date: Fri, 18 Apr 2026 08:50:00 +0000\n"
+            "   Preview: A new issue was opened for a checkout regression...\n"
+            "   ID: bug-002\n\n"
+            "3. [UNREAD] From: Alerts <alerts@example.com>\n"
+            "   Subject: failing tests in payments service\n"
+            "   Date: Thu, 17 Apr 2026 23:40:00 +0000\n"
+            "   Preview: Multiple tests started failing after the latest deploy...\n"
+            "   ID: bug-003\n"
+        )
+
+    def get_email_body(self, email_id: str) -> str:
+        self._record("get_email_body", email_id=email_id)
+        return f"Email body for {email_id}"
+
+
 class DraftReplyToolBox:
     def __init__(self):
         self.calls: list[tuple[str, dict[str, object]]] = []
@@ -1407,6 +1442,71 @@ def test_urgent_email_triage_skill_uses_fixed_workflow(repo_root: Path | None = 
     )
     assert toolbox.calls[6:] == [
         ("get_email_body", {"email_id": "unanswered-001"}),
+    ]
+
+
+def test_bug_issue_triage_skill_uses_fixed_workflow(repo_root: Path | None = None):
+    del repo_root
+    toolbox = BugIssueToolBox()
+    tool_function_map = build_tool_function_map([toolbox])
+    skills_directory = Path(__file__).resolve().parent.parent / "skills"
+
+    executor = PythonSkillExecutor(
+        skills_directory=skills_directory,
+        tool_function_map=tool_function_map,
+    )
+
+    result = executor.run(
+        SkillSpec(
+            name="bug_issue_triage",
+            description="Find recent inbox emails, notifications, or task-record messages that look bug-related, such as build failures, issue openings, failing tests, regressions, incidents, or broken workflows, and fetch the full body of every matched email.",
+            scope="Read-only bug triage workflow. Never send email and never modify mailbox state.",
+            used_tools=("search_emails", "get_email_body"),
+            output="A user-facing prioritized bug triage grounded only in keyword search hits and the fetched full bodies of every matched email.",
+            input_schema=(
+                SkillInputFieldSpec(
+                    name="days",
+                    field_type="int",
+                    required=False,
+                    description="Number of recent days to inspect for bug-related or engineering-problem emails.",
+                    has_default=True,
+                    default=7,
+                ),
+            ),
+        ),
+        skill_arguments={"days": 10},
+        current_message="帮我整理最近10天要处理的 bug 事项",
+        intent_decision=type(
+            "IntentDecisionLike",
+            (),
+            {"intent": "用户想让我从最近邮件中整理出需要优先处理的 bug 相关事项。"},
+        )(),
+        recent_context=[],
+    )
+
+    assert result.completed is True
+    assert "[BUG_ISSUE_TRIAGE_BUNDLE]" in result.response
+    assert "search_query: in:inbox newer_than:7d" in result.response
+    assert "max_lookback_days: 7" in result.response
+    assert "[SEARCH_EMAILS]" in result.response
+    assert "[MATCHED_BUG_EMAIL_IDS]" in result.response
+    assert "[EMAIL_BODY_RESULTS]" in result.response
+    assert "[EMAIL_BODY_1]" in result.response
+    assert "[EMAIL_BODY_3]" in result.response
+    assert "Finalizer instruction: rank the resulting bug items from highest priority to lowest priority before presenting them to the user." in result.response
+    assert "bug-001, bug-002, bug-003" in result.response
+
+    expected_query = (
+        'in:inbox newer_than:7d (bug OR bugs OR defect OR regression OR "build failed" OR "build failure" OR '
+        '"failing tests" OR "tests failed" OR "test failed" OR "ci failed" OR "pipeline failed" OR "issue opened" OR '
+        '"incident opened" OR "production issue" OR "prod issue" OR incident OR outage OR broken OR failure OR blocker OR '
+        '"error report")'
+    )
+    assert toolbox.calls == [
+        ("search_emails", {"query": expected_query, "max_results": 350}),
+        ("get_email_body", {"email_id": "bug-001"}),
+        ("get_email_body", {"email_id": "bug-002"}),
+        ("get_email_body", {"email_id": "bug-003"}),
     ]
 
 

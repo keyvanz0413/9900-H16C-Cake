@@ -57,6 +57,19 @@ skills:
         default: 7
         description: Number of recent days to inspect for urgent, attention-needed, or high-priority emails, capped at 7.
     output: A user-facing triage of recent inbox emails that look urgent, need attention, or appear high-priority, grounded only in keyword search hits, unanswered-thread context, and the fetched full bodies of matched urgent and unresolved unanswered emails.
+  - name: bug_issue_triage
+    description: Find recent inbox emails, notifications, or task-record messages that look bug-related, such as build failures, issue openings, failing tests, regressions, incidents, or broken workflows, and fetch the full body of every matched email.
+    scope: Read-only bug triage workflow. Never send email and never modify mailbox state.
+    used_tools:
+      - search_emails
+      - get_email_body
+    input_schema:
+      days:
+        type: int
+        required: false
+        default: 7
+        description: Number of recent days to inspect for bug-related or engineering-problem emails, capped at 7.
+    output: A user-facing prioritized bug triage grounded only in keyword search hits and the fetched full bodies of every matched email.
   - name: draft_reply_from_email_context
     description: Locate a target email either by unanswered-message rank or by a mailbox search query, then fetch the target email body so the outer layer can draft a reply.
     scope: Draft-only reply workflow. Never send email and never modify mailbox state.
