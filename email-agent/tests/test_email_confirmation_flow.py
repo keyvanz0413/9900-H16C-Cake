@@ -33,13 +33,9 @@ def _keep_draft_as_is(agent_module, monkeypatch):
     )
 
 
-def test_cleanup_uses_latest_sender_name_from_memory(monkeypatch):
+def test_cleanup_uses_current_sender_name(monkeypatch):
     agent_module = _load_agent_module()
-    monkeypatch.setattr(
-        agent_module.memory,
-        "read_memory",
-        lambda key: "Memory: preference-sender-name\n\nKeyvan Zhuo" if key == "preference-sender-name" else "Memory not found",
-    )
+    monkeypatch.setattr(agent_module, "_current_sender_name", lambda: "Keyvan Zhuo")
     monkeypatch.setattr(
         agent_module,
         "llm_do",

@@ -694,22 +694,10 @@ def _load_prompt(base: str, examples: str = "prompts/email_draft_examples.md", s
         content = f"The sender's name is: {sender_name}\nAlways use this name to sign emails.\n\n" + content
     return content
 
-def _sender_name_from_memory() -> str:
-    result = memory.read_memory("preference-sender-name")
-    if result.startswith("Memory not found"):
-        return ""
-    header = "Memory: preference-sender-name\n\n"
-    body = result[len(header):] if result.startswith(header) else result
-    return body.strip()
-
-
 def _current_sender_name() -> str:
-    sender_name = _sender_name_from_memory()
-    if sender_name:
-        return sender_name
     if has_gmail:
         try:
-            return _gmail.get_sender_name()
+            return (_gmail.get_sender_name() or "").strip()
         except Exception:
             return ""
     return ""

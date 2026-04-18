@@ -13,7 +13,7 @@ from .core import (
     do_inbox, do_search, do_contacts, do_sync,
     do_init, do_unanswered, do_identity, do_today, do_ask, do_host
 )
-from .setup import check_setup, check_user_profile
+from .setup import check_setup
 from .interactive import interactive
 
 app = typer.Typer(
@@ -29,14 +29,7 @@ def main(ctx: typer.Context):
     """Email Agent - Interactive email management from your terminal."""
     if ctx.invoked_subcommand is None:
         if check_setup():
-            check_user_profile()
             interactive()
-
-
-@app.command()
-def profile():
-    """Configure your user profile (sender name). Re-runs setup if missing."""
-    check_user_profile()
 
 
 @app.command()
