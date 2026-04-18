@@ -69,7 +69,16 @@ sync_connectonion_env() {
 run_setup() {
   load_env_file
 
-  if [ -z "${OPENONION_API_KEY:-}" ]; then
+  has_llm_key="false"
+  for key_name in OPENAI_API_KEY ANTHROPIC_API_KEY GEMINI_API_KEY OPENROUTER_API_KEY OPENONION_API_KEY; do
+    eval "key_value=\${$key_name:-}"
+    if [ -n "${key_value}" ]; then
+      has_llm_key="true"
+      break
+    fi
+  done
+
+  if [ "${has_llm_key}" != "true" ]; then
     echo "[entrypoint] OpenOnion auth required..."
     co auth
     load_env_file

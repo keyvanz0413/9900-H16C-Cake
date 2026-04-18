@@ -104,5 +104,12 @@ def do_ask(question: str) -> str:
 
 def do_host(port: int = 8000, trust: str = "careful"):
     """Start the agent as an HTTP/WebSocket server."""
+    import inspect
     from connectonion import host
-    host(agent, port=port, trust=trust)
+
+    # connectonion>=0.9 expects a factory; older releases accepted an Agent instance.
+    first_param = next(iter(inspect.signature(host).parameters.values()))
+    if first_param.name == "create_agent":
+        host(lambda: agent, port=port, trust=trust)
+    else:
+        host(agent, port=port, trust=trust)
