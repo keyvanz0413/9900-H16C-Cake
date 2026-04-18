@@ -9,14 +9,33 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
 from typing import Literal
 
 from connectonion import Agent, Memory, WebFetch, Shell, TodoList, llm_do
 from pydantic import BaseModel
 
 from plugins import calendar_approval_plugin, gmail_approval_plugin, re_act
+from intent_layer import (
+    IntentLayerOrchestrator,
+    MarkdownMemoryStore,
+    PythonSkillExecutor,
+    build_tool_function_map,
+)
 
 MODEL_NAME = os.getenv("AGENT_MODEL", "co/claude-sonnet-4-5")
+INTENT_MODEL_NAME = os.getenv("INTENT_LAYER_MODEL", MODEL_NAME)
+SKILL_SELECTOR_MODEL_NAME = os.getenv("SKILL_SELECTOR_MODEL", INTENT_MODEL_NAME)
+SKILL_FINALIZER_MODEL_NAME = os.getenv("SKILL_FINALIZER_MODEL", INTENT_MODEL_NAME)
+WRITING_STYLE_MODEL_NAME = os.getenv("WRITING_STYLE_MODEL", INTENT_MODEL_NAME)
+USER_MEMORY_MODEL_NAME = os.getenv("USER_MEMORY_MODEL", INTENT_MODEL_NAME)
+
+BASE_DIR = Path(__file__).resolve().parent
+PROMPTS_DIR = BASE_DIR / "prompts"
+SKILL_REGISTRY_PATH = BASE_DIR / "skills" / "registry.yaml"
+USER_PROFILE_PATH = BASE_DIR / "USER_PROFILE.md"
+USER_HABITS_PATH = BASE_DIR / "USER_HABITS.md"
+WRITING_STYLE_PATH = BASE_DIR / "WRITING_STYLE.md"
 PENDING_EMAIL_INTENT_PROMPT = """
 You classify the user's latest message about a pending email draft.
 
@@ -752,14 +771,86 @@ def init_crm_database(max_emails: int = 500, top_n: int = 10, exclude_domains: s
 # Add remaining tools to the list
 tools.extend([memory, shell, todo, init_crm_database])
 
-# Create main agent
-agent = EmailAgent(
+# Create main execution agent (our EmailAgent keeps the pending-email confirmation flow)
+main_agent = EmailAgent(
     name="email-agent",
     system_prompt=system_prompt,
     tools=tools,
     plugins=plugins,
     max_iterations=15,
     model=MODEL_NAME,
+)
+
+# Intent and routing helper agents are lightweight single-step LLM calls.
+intent_agent = Agent(
+    name="email-agent-intent-layer",
+    system_prompt=PROMPTS_DIR / "intent_layer.md",
+    tools=[],
+    max_iterations=1,
+    model=INTENT_MODEL_NAME,
+)
+
+skill_selector_agent = Agent(
+    name="email-agent-skills-selector",
+    system_prompt=PROMPTS_DIR / "skills_selector.md",
+    tools=[],
+    max_iterations=1,
+    model=SKILL_SELECTOR_MODEL_NAME,
+)
+
+skill_finalizer_agent = Agent(
+    name="email-agent-skill-finalizer",
+    system_prompt=PROMPTS_DIR / "skill_finalizer.md",
+    tools=[],
+    max_iterations=1,
+    model=SKILL_FINALIZER_MODEL_NAME,
+)
+
+user_memory_writer_agent = Agent(
+    name="email-agent-user-memory-writer",
+    system_prompt=PROMPTS_DIR / "user_memory_writer.md",
+    tools=[],
+    max_iterations=1,
+    model=USER_MEMORY_MODEL_NAME,
+)
+
+writing_style_writer_agent = Agent(
+    name="email-agent-writing-style-writer",
+    system_prompt=PROMPTS_DIR / "writing_style_writer.md",
+    tools=[],
+    max_iterations=1,
+    model=WRITING_STYLE_MODEL_NAME,
+)
+
+memory_store = MarkdownMemoryStore(
+    profile_path=USER_PROFILE_PATH,
+    habits_path=USER_HABITS_PATH,
+    writer_agent=user_memory_writer_agent,
+)
+
+skill_executor = PythonSkillExecutor(
+    skills_directory=BASE_DIR / "skills",
+    tool_function_map=build_tool_function_map(tools),
+    skill_runtime={
+        "agents": {
+            "writing_style_writer": writing_style_writer_agent,
+        },
+        "paths": {
+            "writing_style_markdown": WRITING_STYLE_PATH,
+        },
+    },
+)
+
+# Wrap the main agent in the intent/skill orchestrator.
+# main_agent still gets called for any route that falls through to tools/confirmation.
+agent = IntentLayerOrchestrator(
+    main_agent=main_agent,
+    intent_agent=intent_agent,
+    skill_selector_agent=skill_selector_agent,
+    skill_finalizer_agent=skill_finalizer_agent,
+    skill_executor=skill_executor,
+    memory_store=memory_store,
+    skill_registry_path=SKILL_REGISTRY_PATH,
 )
 
 # Example usage

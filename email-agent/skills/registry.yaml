@@ -1,0 +1,86 @@
+# Skill registry template
+# Each skill declares its own structured input contract.
+#
+# Example:
+# skills:
+#   - name: weekly_email_summary
+#     description: Summarize recent inbox activity.
+#     scope: Read-only summary of recent inbox activity.
+#     used_tools:
+#       - search_emails
+#       - get_unanswered_emails
+#     input_schema:
+#       days:
+#         type: int
+#         required: false
+#         default: 7
+#         description: Number of recent days to summarize.
+#       include_unanswered:
+#         type: bool
+#         required: false
+#         default: true
+#         description: Whether to include unanswered-thread context.
+#     output: A concise weekly inbox summary.
+skills:
+  - name: weekly_email_summary
+    description: Summarize recent email activity for a recent time window using mailbox identity, inbox, unanswered, and calendar context.
+    scope: Read-only weekly summary workflow. Never send email and never modify mailbox state.
+    used_tools:
+      - get_my_identity
+      - search_emails
+      - get_unanswered_emails
+      - list_events
+    input_schema:
+      days:
+        type: int
+        required: false
+        default: 7
+        description: Number of recent days to summarize.
+    output: A user-facing weekly email summary grounded only in the collected identity, inbox, unanswered, and calendar tool results.
+  - name: writing_style_profile
+    description: Build or update a persistent writing style profile from the user's recent sent emails.
+    scope: Read recent sent emails and update the local writing style markdown only. Never send email and never modify mailbox state beyond WRITING_STYLE.md.
+    used_tools:
+      - get_sent_emails
+    output: A user-facing confirmation plus the updated WRITING_STYLE markdown derived from recent sent emails.
+  - name: urgent_email_triage
+    description: Find recent inbox emails that look urgent, need attention, or appear high-priority, add unanswered-thread context, and fetch full bodies for both matched urgent emails and unresolved unanswered emails.
+    scope: Read-only urgent-email triage workflow. Never send email and never modify mailbox state.
+    used_tools:
+      - search_emails
+      - get_unanswered_emails
+      - get_email_body
+    input_schema:
+      days:
+        type: int
+        required: false
+        default: 7
+        description: Number of recent days to inspect for urgent, attention-needed, or high-priority emails, capped at 7.
+    output: A user-facing triage of recent inbox emails that look urgent, need attention, or appear high-priority, grounded only in keyword search hits, unanswered-thread context, and the fetched full bodies of matched urgent and unresolved unanswered emails.
+  - name: draft_reply_from_email_context
+    description: Locate a target email either by unanswered-message rank or by a mailbox search query, then fetch the target email body so the outer layer can draft a reply.
+    scope: Draft-only reply workflow. Never send email and never modify mailbox state.
+    used_tools:
+      - search_emails
+      - get_unanswered_emails
+      - get_email_body
+    input_schema:
+      selection_mode:
+        type: string
+        required: true
+        description: How to locate the target email. Use unanswered_rank for "latest/second unanswered email" requests, or search_query for requests anchored by a person, topic, subject, or other mailbox clue.
+      target_rank:
+        type: int
+        required: false
+        default: 1
+        description: 1-based rank used only when selection_mode is unanswered_rank. 1 means the latest unanswered email, 2 means the second latest unanswered email, and so on.
+      query:
+        type: string
+        required: false
+        description: Mailbox search fragment used only when selection_mode is search_query, for example from:alice@example.com OR to:alice@example.com, subject:"deadline", or security alert.
+      days:
+        type: int
+        required: false
+        default: 30
+        description: Search lookback window used only when selection_mode is search_query, capped at 30.
+    output: A user-facing reply draft grounded only in the located target email, the associated mailbox search results, and the fetched full email body.
