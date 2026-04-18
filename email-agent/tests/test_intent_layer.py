@@ -208,6 +208,81 @@ class BugIssueToolBox:
         return f"Email body for {email_id}"
 
 
+class ResumeCandidateToolBox:
+    def __init__(self):
+        self.calls: list[tuple[str, dict[str, object]]] = []
+        self._lock = threading.Lock()
+
+    def _record(self, tool_name: str, **kwargs: object) -> None:
+        with self._lock:
+            self.calls.append((tool_name, kwargs))
+
+    def search_emails(self, query: str, max_results: int = 10) -> str:
+        self._record("search_emails", query=query, max_results=max_results)
+        return (
+            "Found 2 email(s):\n\n"
+            "1. [UNREAD] From: Riley Applicant <riley@example.com>\n"
+            "   Subject: Application for Backend Engineer role\n"
+            "   Date: Fri, 18 Apr 2026 09:30:00 +0000\n"
+            "   Preview: Please find attached my resume and portfolio...\n"
+            "   ID: resume-001\n\n"
+            "2. [UNREAD] From: Jules Recruiter <jules@agency.com>\n"
+            "   Subject: Candidate profile for ML Engineer\n"
+            "   Date: Thu, 17 Apr 2026 17:15:00 +0000\n"
+            "   Preview: Sharing a candidate profile for your review...\n"
+            "   ID: resume-002\n"
+        )
+
+    def get_email_attachments(self, email_id: str) -> str:
+        self._record("get_email_attachments", email_id=email_id)
+        if email_id == "resume-001":
+            return (
+                "Found 1 attachment(s):\n\n"
+                "1. Riley_Resume.pdf (152.4 KB)\n"
+                "   ID: att-resume-001\n"
+            )
+        return "No attachments in this email."
+
+    def extract_recent_attachment_texts(self, query: str, max_results: int = 10) -> str:
+        self._record("extract_recent_attachment_texts", query=query, max_results=max_results)
+        return (
+            "Recent attachment text extraction results.\n"
+            'Query: in:inbox newer_than:7d (candidate OR applicant OR application OR resume OR cv OR portfolio OR "job application" OR "application for" OR "applying for" OR "cover letter" OR "candidate profile" OR "candidate submission" OR "resume attached" OR "cv attached") has:attachment\n'
+            "Message scan limit: 350\n"
+            "Matched message count: 2\n"
+            "Attachment count: 2\n"
+            "Extracted attachment count: 2\n\n"
+            "[EMAIL_1]\n"
+            "Message ID: resume-001\n"
+            "Thread ID: thread-resume-001\n"
+            "From: Riley Applicant <riley@example.com>\n"
+            "Subject: Application for Backend Engineer role\n"
+            "Date: Fri, 18 Apr 2026 09:30:00 +0000\n"
+            "Attachment count: 1\n"
+            "[ATTACHMENT_1_1]\n"
+            "Filename: Riley_Resume.pdf\n"
+            "MIME Type: application/pdf\n"
+            "Attachment ID: att-resume-001\n"
+            "Status: extracted\n"
+            "Extracted Text:\n"
+            "Riley Applicant. Backend engineer. Python, FastAPI, Postgres, LLM tooling.\n\n"
+            "[EMAIL_2]\n"
+            "Message ID: unrelated-999\n"
+            "Thread ID: thread-unrelated-999\n"
+            "From: Ops <ops@example.com>\n"
+            "Subject: Statement attached\n"
+            "Date: Thu, 17 Apr 2026 08:00:00 +0000\n"
+            "Attachment count: 1\n"
+            "[ATTACHMENT_2_1]\n"
+            "Filename: statement.pdf\n"
+            "MIME Type: application/pdf\n"
+            "Attachment ID: att-unrelated-999\n"
+            "Status: extracted\n"
+            "Extracted Text:\n"
+            "Monthly statement.\n"
+        )
+
+
 class DraftReplyToolBox:
     def __init__(self):
         self.calls: list[tuple[str, dict[str, object]]] = []
@@ -1507,6 +1582,77 @@ def test_bug_issue_triage_skill_uses_fixed_workflow(repo_root: Path | None = Non
         ("get_email_body", {"email_id": "bug-001"}),
         ("get_email_body", {"email_id": "bug-002"}),
         ("get_email_body", {"email_id": "bug-003"}),
+    ]
+
+
+def test_resume_candidate_review_skill_uses_fixed_workflow(repo_root: Path | None = None):
+    del repo_root
+    toolbox = ResumeCandidateToolBox()
+    tool_function_map = build_tool_function_map([toolbox])
+    skills_directory = Path(__file__).resolve().parent.parent / "skills"
+
+    executor = PythonSkillExecutor(
+        skills_directory=skills_directory,
+        tool_function_map=tool_function_map,
+    )
+
+    result = executor.run(
+        SkillSpec(
+            name="resume_candidate_review",
+            description="Find recent candidate, application, or resume-related inbox emails, inspect whether they include attachments, and pass relevant extracted attachment text through to the external finalizer for structured candidate summaries.",
+            scope="Read-only resume and candidate review workflow. Never send email and never modify mailbox state.",
+            used_tools=("search_emails", "get_email_attachments", "extract_recent_attachment_texts"),
+            output="A user-facing structured candidate review grounded only in the search hits, attachment listings, and any extracted attachment text from matched candidate emails.",
+            input_schema=(
+                SkillInputFieldSpec(
+                    name="days",
+                    field_type="int",
+                    required=False,
+                    description="Number of recent days to inspect for candidate, application, or resume-related emails.",
+                    has_default=True,
+                    default=7,
+                ),
+            ),
+        ),
+        skill_arguments={"days": 10},
+        current_message="帮我获取最近简历的主要信息并结构化总结",
+        intent_decision=type(
+            "IntentDecisionLike",
+            (),
+            {"intent": "用户想让我总结最近候选人或简历邮件里的主要信息，并优先使用附件内容做结构化总结。"},
+        )(),
+        recent_context=[],
+    )
+
+    assert result.completed is True
+    assert "[RESUME_CANDIDATE_REVIEW_BUNDLE]" in result.response
+    assert "search_query: in:inbox newer_than:7d" in result.response
+    assert "[SEARCH_EMAILS]" in result.response
+    assert "[ATTACHMENT_CHECK_RESULTS]" in result.response
+    assert "[MATCHED_CANDIDATE_EMAIL_IDS_WITH_ATTACHMENTS]" in result.response
+    assert "[RELEVANT_ATTACHMENT_TEXT_EXTRACTIONS]" in result.response
+    assert "Finalizer instruction: produce a structured candidate summary for each relevant candidate email, grounded first in extracted attachment text when available." in result.response
+    assert "resume-001, resume-002" in result.response
+    assert "resume-001" in result.response
+    assert "Riley Applicant. Backend engineer. Python, FastAPI, Postgres, LLM tooling." in result.response
+    assert "unrelated-999" not in result.response
+
+    expected_query = (
+        'in:inbox newer_than:7d (candidate OR applicant OR application OR resume OR cv OR portfolio OR '
+        '"job application" OR "application for" OR "applying for" OR "cover letter" OR "candidate profile" OR '
+        '"candidate submission" OR "resume attached" OR "cv attached")'
+    )
+    assert toolbox.calls == [
+        ("search_emails", {"query": expected_query, "max_results": 350}),
+        ("get_email_attachments", {"email_id": "resume-001"}),
+        ("get_email_attachments", {"email_id": "resume-002"}),
+        (
+            "extract_recent_attachment_texts",
+            {
+                "query": 'in:inbox newer_than:7d (candidate OR applicant OR application OR resume OR cv OR portfolio OR "job application" OR "application for" OR "applying for" OR "cover letter" OR "candidate profile" OR "candidate submission" OR "resume attached" OR "cv attached") has:attachment',
+                "max_results": 350,
+            },
+        ),
     ]
 
 

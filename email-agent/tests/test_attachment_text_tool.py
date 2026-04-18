@@ -70,7 +70,7 @@ class _FakeEmailTool:
         return self._service_instance
 
 
-def test_extract_recent_attachment_texts_uses_days_and_max_results():
+def test_extract_recent_attachment_texts_uses_query_and_max_results():
     calls = []
     list_payload = {"messages": [{"id": "msg-001"}]}
     message_payloads = {
@@ -99,7 +99,7 @@ def test_extract_recent_attachment_texts_uses_days_and_max_results():
 
     result = extract_recent_attachment_texts_from_email_tool(
         email_tool=email_tool,
-        days=7,
+        query="in:inbox newer_than:7d has:attachment",
         max_results=5,
     )
 
@@ -154,7 +154,7 @@ def test_extract_recent_attachment_texts_fetches_attachment_bytes_and_marks_unsu
 
     result = extract_recent_attachment_texts_from_email_tool(
         email_tool=email_tool,
-        days=3,
+        query="from:recruiter@example.com has:attachment",
         max_results=1,
     )
 
@@ -163,4 +163,3 @@ def test_extract_recent_attachment_texts_fetches_attachment_bytes_and_marks_unsu
     assert "Filename: photo.png" in result
     assert "Status: skipped (unsupported attachment type)" in result
     assert ("attachment_get", {"userId": "me", "messageId": "msg-002", "id": "att-001"}) in calls
-

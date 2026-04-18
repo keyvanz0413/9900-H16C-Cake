@@ -243,30 +243,31 @@ def _collect_attachments(service: Any, *, message: dict[str, Any]) -> list[dict[
 def extract_recent_attachment_texts_from_email_tool(
     *,
     email_tool: Any,
-    days: int = 7,
+    query: str,
     max_results: int = 10,
 ) -> str:
-    safe_days = max(int(days or 0), 1)
+    normalized_query = " ".join(str(query or "").strip().split())
+    if not normalized_query:
+        return "Attachment text extraction requires a non-empty Gmail search query."
     safe_max_results = min(max(int(max_results or 0), 1), 100)
     service = email_tool._get_service()
-    query = f"in:inbox newer_than:{safe_days}d has:attachment"
 
     results = service.users().messages().list(
         userId="me",
-        q=query,
+        q=normalized_query,
         maxResults=safe_max_results,
     ).execute()
 
     message_refs = results.get("messages", []) or []
     if not message_refs:
         return (
-            f"No attachment-bearing inbox emails found in the last {safe_days} day(s).\n"
-            f"Query: {query}"
+            "No attachment-bearing emails found for this query.\n"
+            f"Query: {normalized_query}"
         )
 
     lines = [
-        f"Recent attachment text extraction for the last {safe_days} day(s).",
-        f"Query: {query}",
+        "Recent attachment text extraction results.",
+        f"Query: {normalized_query}",
         f"Message scan limit: {safe_max_results}",
         f"Matched message count: {len(message_refs)}",
         f"Supported attachment types: {', '.join(_SUPPORTED_EXTENSIONS)}",
@@ -328,4 +329,3 @@ def extract_recent_attachment_texts_from_email_tool(
     lines.insert(4, f"Attachment count: {total_attachments}")
     lines.insert(5, f"Extracted attachment count: {total_extracted}")
     return "\n".join(lines).strip()
-

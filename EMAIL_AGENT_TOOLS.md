@@ -68,8 +68,8 @@
 ### `extract_recent_attachment_texts`
 - 中文说明：抽取最近几天内带附件邮件的附件文本内容。
 - 主要作用：把最近 inbox 中 PDF / DOCX / TXT / HTML 这类附件转成可读文本，供简历、合同、账单等后续 skill 使用。
-- 常用参数：`days`, `max_results`
-- 说明：当前是 Gmail 专用；内部固定查询 `in:inbox newer_than:{days}d has:attachment`
+- 常用参数：`query`, `max_results`
+- 说明：当前是 Gmail 专用；用 Gmail 查询语法先筛邮件，再抽这些邮件中的附件文本
 
 ### `get_email_body`
 - 中文说明：读取邮件完整正文。

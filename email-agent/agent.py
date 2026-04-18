@@ -56,11 +56,11 @@ def _get_primary_email_tool():
     return None
 
 
-def extract_recent_attachment_texts(days: int = 7, max_results: int = 10) -> str:
+def extract_recent_attachment_texts(query: str, max_results: int = 10) -> str:
     """Extract text from attachments in recent Gmail inbox emails.
 
     Args:
-        days: Look back over the most recent N days.
+        query: Gmail search query used to select emails whose attachments should be extracted.
         max_results: Maximum number of recent attachment-bearing emails to scan.
 
     Returns:
@@ -71,7 +71,7 @@ def extract_recent_attachment_texts(days: int = 7, max_results: int = 10) -> str
         return "Recent attachment text extraction is only available when Gmail is connected."
     return extract_recent_attachment_texts_from_email_tool(
         email_tool=email_tool,
-        days=days,
+        query=query,
         max_results=max_results,
     )
 

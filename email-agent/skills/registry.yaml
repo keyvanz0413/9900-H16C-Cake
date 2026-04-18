@@ -70,6 +70,20 @@ skills:
         default: 7
         description: Number of recent days to inspect for bug-related or engineering-problem emails, capped at 7.
     output: A user-facing prioritized bug triage grounded only in keyword search hits and the fetched full bodies of every matched email.
+  - name: resume_candidate_review
+    description: Find recent candidate, application, or resume-related inbox emails, inspect whether they include attachments, and pass relevant extracted attachment text through to the external finalizer for structured candidate summaries.
+    scope: Read-only resume and candidate review workflow. Never send email and never modify mailbox state.
+    used_tools:
+      - search_emails
+      - get_email_attachments
+      - extract_recent_attachment_texts
+    input_schema:
+      days:
+        type: int
+        required: false
+        default: 7
+        description: Number of recent days to inspect for candidate, application, or resume-related emails, capped at 7.
+    output: A user-facing structured candidate review grounded only in the search hits, attachment listings, and any extracted attachment text from matched candidate emails.
   - name: draft_reply_from_email_context
     description: Locate a target email either by unanswered-message rank or by a mailbox search query, then fetch the target email body so the outer layer can draft a reply.
     scope: Draft-only reply workflow. Never send email and never modify mailbox state.
