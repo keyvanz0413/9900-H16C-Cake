@@ -765,6 +765,7 @@ class IntentLayerOrchestrator:
         main_agent: SupportsInput,
         intent_agent: SupportsInput,
         skill_selector_agent: SupportsInput,
+        skill_finalizer_agent: SupportsInput,
         skill_executor: SupportsSkillExecution | None,
         memory_store: MarkdownMemoryStore,
         skill_registry_path: Path,
@@ -772,6 +773,7 @@ class IntentLayerOrchestrator:
         self._main_agent = main_agent
         self._intent_agent = intent_agent
         self._skill_selector_agent = skill_selector_agent
+        self._skill_finalizer_agent = skill_finalizer_agent
         self._skill_executor = skill_executor
         self._memory_store = memory_store
         self._skill_registry_path = skill_registry_path
@@ -836,6 +838,7 @@ class IntentLayerOrchestrator:
                     registered_skills=len(available_skills),
                 )
                 skill_execution_result: SkillExecutionResult | None = None
+                skill_spec: SkillSpec | None = None
 
                 if selection.should_use_skill and self._skill_executor is not None and selection.skill_name:
                     skill_spec = skills_by_name.get(selection.skill_name)
@@ -861,12 +864,33 @@ class IntentLayerOrchestrator:
                             reason=skill_execution_result.reason,
                         )
 
-                if skill_execution_result is not None and skill_execution_result.completed and skill_execution_result.response:
+                if (
+                    skill_spec is not None
+                    and skill_execution_result is not None
+                    and skill_execution_result.completed
+                    and skill_execution_result.response
+                ):
+                    self._log_route(
+                        "skill_finalizer_started",
+                        skill_name=skill_spec.name,
+                    )
+                    final_response, finalizer_reason = self._finalize_skill_response(
+                        intent_decision=intent_decision,
+                        recent_context=recent_context,
+                        skill_spec=skill_spec,
+                        skill_execution_result=skill_execution_result,
+                    )
+                    self._log_route(
+                        "skill_finalizer_finished",
+                        skill_name=skill_spec.name,
+                        reason=finalizer_reason,
+                    )
                     self._log_route(
                         "skill_response",
                         skill_name=selection.skill_name,
+                        finalizer_reason=finalizer_reason,
                     )
-                    response = skill_execution_result.response
+                    response = final_response
                 else:
                     self._log_route(
                         "main_agent",
@@ -1110,6 +1134,71 @@ class IntentLayerOrchestrator:
             raise SkillLayerError("Skill selector returned non-empty skill_arguments even though should_use_skill=false.")
 
         return SkillSelection(False, None, reason, {})
+
+    def _finalize_skill_response(
+        self,
+        *,
+        intent_decision: IntentDecision,
+        recent_context: list[DialogueItem],
+        skill_spec: SkillSpec,
+        skill_execution_result: SkillExecutionResult,
+    ) -> tuple[str, str]:
+        skill_result_payload = {
+            "completed": skill_execution_result.completed,
+            "skill_result": skill_execution_result.response,
+            "reason": skill_execution_result.reason,
+        }
+        prompt = "\n\n".join(
+            [
+                "[INTENT]",
+                intent_decision.intent,
+                "[RECENT_CONTEXT]",
+                format_context(recent_context),
+                "[SELECTED_SKILL]",
+                "\n".join(
+                    [
+                        f"skill_name: {skill_spec.name}",
+                        f"skill_description: {skill_spec.description or '(empty)'}",
+                        f"skill_scope: {skill_spec.scope or '(empty)'}",
+                        f"skill_output: {skill_spec.output or '(empty)'}",
+                    ]
+                ),
+                "[SKILL_RESULT]",
+                json.dumps(skill_result_payload, ensure_ascii=False, indent=2),
+            ]
+        )
+
+        try:
+            raw_response = self._skill_finalizer_agent.input(prompt, max_iterations=1)
+            payload = _extract_json_payload(raw_response)
+        except Exception as exc:
+            self._log_route(
+                "skill_finalizer_error",
+                skill_name=skill_spec.name,
+                reason=f"Skill finalizer execution failed: {exc}",
+            )
+            raise SkillLayerError(f"Skill finalizer execution failed: {exc}") from exc
+
+        try:
+            final_response = _require_non_empty_string(
+                payload.get("final_response"),
+                field_name="final_response",
+                error_type=SkillLayerError,
+            )
+            reason = _require_non_empty_string(
+                payload.get("reason"),
+                field_name="reason",
+                error_type=SkillLayerError,
+            )
+        except Exception as exc:
+            self._log_route(
+                "skill_finalizer_error",
+                skill_name=skill_spec.name,
+                reason=f"Skill finalizer returned invalid output: {exc}",
+            )
+            raise
+
+        return final_response, reason
 
     def _run_main_agent(
         self,

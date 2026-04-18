@@ -76,6 +76,10 @@ class ToolBox:
         return f"sent:{recipient}:{body}"
 
 
+def make_noop_skill_finalizer() -> FakeAgent:
+    return FakeAgent(['{"final_response":"should not be used","reason":"noop"}'], name="skill-finalizer")
+
+
 def test_split_context_respects_window_limits():
     dialogue = [DialogueItem(role="user" if index % 2 == 0 else "assistant", content=f"message {index}") for index in range(60)]
 
@@ -169,6 +173,7 @@ def test_orchestrator_direct_response_skips_main_agent(tmp_path: Path):
         main_agent=main_agent,
         intent_agent=intent_agent,
         skill_selector_agent=selector_agent,
+        skill_finalizer_agent=make_noop_skill_finalizer(),
         skill_executor=None,
         memory_store=store,
         skill_registry_path=tmp_path / "registry.yaml",
@@ -207,6 +212,7 @@ def test_orchestrator_raises_when_intent_layer_llm_output_is_invalid(tmp_path: P
         main_agent=main_agent,
         intent_agent=intent_agent,
         skill_selector_agent=selector_agent,
+        skill_finalizer_agent=make_noop_skill_finalizer(),
         skill_executor=None,
         memory_store=store,
         skill_registry_path=tmp_path / "registry.yaml",
@@ -262,6 +268,7 @@ def test_orchestrator_handoff_to_main_agent_and_updates_user_files(tmp_path: Pat
         main_agent=main_agent,
         intent_agent=intent_agent,
         skill_selector_agent=selector_agent,
+        skill_finalizer_agent=make_noop_skill_finalizer(),
         skill_executor=None,
         memory_store=store,
         skill_registry_path=registry_path,
@@ -325,6 +332,7 @@ def test_orchestrator_accepts_host_signature_and_forwards_session_payloads(tmp_p
         main_agent=main_agent,
         intent_agent=intent_agent,
         skill_selector_agent=selector_agent,
+        skill_finalizer_agent=make_noop_skill_finalizer(),
         skill_executor=None,
         memory_store=store,
         skill_registry_path=registry_path,
@@ -414,6 +422,7 @@ def test_orchestrator_persists_dialogue_across_new_session_dicts_with_same_sessi
         main_agent=main_agent,
         intent_agent=intent_agent,
         skill_selector_agent=selector_agent,
+        skill_finalizer_agent=make_noop_skill_finalizer(),
         skill_executor=None,
         memory_store=store,
         skill_registry_path=registry_path,
@@ -471,6 +480,7 @@ def test_orchestrator_logs_confidence_for_non_direct_routes(tmp_path: Path):
         main_agent=main_agent,
         intent_agent=intent_agent,
         skill_selector_agent=selector_agent,
+        skill_finalizer_agent=make_noop_skill_finalizer(),
         skill_executor=None,
         memory_store=store,
         skill_registry_path=registry_path,
@@ -546,6 +556,17 @@ def test_orchestrator_returns_selected_skill_response_without_main_agent(tmp_pat
             )
         ]
     )
+    skill_finalizer_agent = FakeAgent(
+        [
+            json.dumps(
+                {
+                    "final_response": "我已经整理好一版可以直接发给用户的草稿：\n\nHere is a concise draft you can send.",
+                    "reason": "The skill already produced a usable draft, so I only reframed it for the user.",
+                }
+            )
+        ],
+        name="skill-finalizer",
+    )
     skill_executor = FakeSkillExecutor(
         SkillExecutionResult(
             attempted=True,
@@ -564,6 +585,7 @@ def test_orchestrator_returns_selected_skill_response_without_main_agent(tmp_pat
         main_agent=main_agent,
         intent_agent=intent_agent,
         skill_selector_agent=selector_agent,
+        skill_finalizer_agent=skill_finalizer_agent,
         skill_executor=skill_executor,
         memory_store=store,
         skill_registry_path=registry_path,
@@ -571,15 +593,117 @@ def test_orchestrator_returns_selected_skill_response_without_main_agent(tmp_pat
 
     result = orchestrator.input("Draft a reply to the client.", max_iterations=6)
 
-    assert result == "Here is a concise draft you can send."
+    assert result == "我已经整理好一版可以直接发给用户的草稿：\n\nHere is a concise draft you can send."
     assert len(main_agent.calls) == 0
     assert len(skill_executor.calls) == 1
+    assert len(skill_finalizer_agent.calls) == 1
+    finalizer_prompt, finalizer_max_iterations, _, _, _ = skill_finalizer_agent.calls[0]
+    assert "[INTENT]" in finalizer_prompt
+    assert "[RECENT_CONTEXT]" in finalizer_prompt
+    assert "[SELECTED_SKILL]" in finalizer_prompt
+    assert "[SKILL_RESULT]" in finalizer_prompt
+    assert "Draft an email reply from existing mailbox context." in finalizer_prompt
+    assert "skill_name: compose_email_from_context" in finalizer_prompt
+    assert "Can only draft, never send" in finalizer_prompt
+    assert "Here is a concise draft you can send." in finalizer_prompt
+    assert "[USER_MESSAGE]" not in finalizer_prompt
+    assert finalizer_max_iterations == 1
     executed_skill, skill_arguments, current_message, intent_text, _, forwarded_max_iterations = skill_executor.calls[0]
     assert executed_skill.name == "compose_email_from_context"
     assert skill_arguments == {}
     assert current_message == "Draft a reply to the client."
     assert intent_text == "Draft an email reply from existing mailbox context."
     assert forwarded_max_iterations == 6
+
+
+def test_orchestrator_raises_when_skill_finalizer_llm_output_is_invalid(tmp_path: Path):
+    registry_path = tmp_path / "registry.yaml"
+    registry_path.write_text(
+        "\n".join(
+            [
+                "skills:",
+                "  - name: compose_email_from_context",
+                "    description: Draft an email from mailbox context",
+                "    scope: Can only draft, never send",
+                "    used_tools:",
+                "      - search_emails",
+                "    output: email_draft",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    main_agent = FakeAgent(["should not run"], name="main-agent", max_iterations=15)
+    intent_agent = FakeAgent(
+        [
+            json.dumps(
+                {
+                    "intent": "Draft an email reply from existing mailbox context.",
+                    "no_execution_confidence": 3,
+                    "final_response": None,
+                    "reason": "This needs a drafting workflow.",
+                    "user_update_summary": "No meaningful update.",
+                }
+            )
+        ]
+    )
+    selector_agent = FakeAgent(
+        [
+            json.dumps(
+                {
+                    "should_use_skill": True,
+                    "skill_name": "compose_email_from_context",
+                    "skill_arguments": {},
+                    "reason": "This request fits the drafting fast path.",
+                }
+            )
+        ]
+    )
+    writer_agent = FakeAgent(
+        [
+            json.dumps(
+                {
+                    "should_update": False,
+                    "profile_markdown": None,
+                    "habits_markdown": None,
+                    "reason": "Nothing new to store.",
+                }
+            )
+        ]
+    )
+    skill_finalizer_agent = FakeAgent(["not valid json"], name="skill-finalizer")
+    skill_executor = FakeSkillExecutor(
+        SkillExecutionResult(
+            attempted=True,
+            completed=True,
+            response="Here is a concise draft you can send.",
+            reason="Skill completed the drafting request.",
+        )
+    )
+
+    store = MarkdownMemoryStore(
+        profile_path=tmp_path / "USER_PROFILE.md",
+        habits_path=tmp_path / "USER_HABITS.md",
+        writer_agent=writer_agent,
+    )
+    orchestrator = IntentLayerOrchestrator(
+        main_agent=main_agent,
+        intent_agent=intent_agent,
+        skill_selector_agent=selector_agent,
+        skill_finalizer_agent=skill_finalizer_agent,
+        skill_executor=skill_executor,
+        memory_store=store,
+        skill_registry_path=registry_path,
+    )
+
+    try:
+        orchestrator.input("Draft a reply to the client.")
+        raise AssertionError("Expected SkillLayerError to be raised.")
+    except SkillLayerError:
+        pass
+
+    assert len(main_agent.calls) == 0
 
 
 def test_orchestrator_falls_back_to_main_agent_when_skill_cannot_complete(tmp_path: Path):
@@ -656,6 +780,7 @@ def test_orchestrator_falls_back_to_main_agent_when_skill_cannot_complete(tmp_pa
         main_agent=main_agent,
         intent_agent=intent_agent,
         skill_selector_agent=selector_agent,
+        skill_finalizer_agent=make_noop_skill_finalizer(),
         skill_executor=skill_executor,
         memory_store=store,
         skill_registry_path=registry_path,
@@ -727,6 +852,7 @@ def test_orchestrator_raises_when_skill_selector_llm_output_is_invalid(tmp_path:
         main_agent=main_agent,
         intent_agent=intent_agent,
         skill_selector_agent=selector_agent,
+        skill_finalizer_agent=make_noop_skill_finalizer(),
         skill_executor=None,
         memory_store=store,
         skill_registry_path=registry_path,
@@ -958,6 +1084,17 @@ def test_skill_selector_validates_and_fills_structured_arguments(tmp_path: Path)
         main_agent=main_agent,
         intent_agent=intent_agent,
         skill_selector_agent=selector_agent,
+        skill_finalizer_agent=FakeAgent(
+            [
+                json.dumps(
+                    {
+                        "final_response": "我已经整理好这份周报摘要：\n\nStructured summary response.",
+                        "reason": "The completed summary skill already provided the core content.",
+                    }
+                )
+            ],
+            name="skill-finalizer",
+        ),
         skill_executor=skill_executor,
         memory_store=store,
         skill_registry_path=registry_path,
@@ -965,7 +1102,7 @@ def test_skill_selector_validates_and_fills_structured_arguments(tmp_path: Path)
 
     result = orchestrator.input("Give me a weekly inbox summary.")
 
-    assert result == "Structured summary response."
+    assert result == "我已经整理好这份周报摘要：\n\nStructured summary response."
     executed_skill, skill_arguments, _, _, _, _ = skill_executor.calls[0]
     assert executed_skill.name == "weekly_email_summary"
     assert skill_arguments == {"days": 14, "include_unanswered": True}
@@ -1043,6 +1180,7 @@ def test_skill_selector_rejects_unknown_structured_arguments(tmp_path: Path):
         main_agent=main_agent,
         intent_agent=intent_agent,
         skill_selector_agent=selector_agent,
+        skill_finalizer_agent=make_noop_skill_finalizer(),
         skill_executor=None,
         memory_store=store,
         skill_registry_path=registry_path,

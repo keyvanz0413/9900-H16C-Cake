@@ -20,6 +20,7 @@ from intent_layer import (
 MODEL_NAME = os.getenv("AGENT_MODEL", "co/claude-sonnet-4-5")
 INTENT_MODEL_NAME = os.getenv("INTENT_LAYER_MODEL", MODEL_NAME)
 SKILL_SELECTOR_MODEL_NAME = os.getenv("SKILL_SELECTOR_MODEL", INTENT_MODEL_NAME)
+SKILL_FINALIZER_MODEL_NAME = os.getenv("SKILL_FINALIZER_MODEL", INTENT_MODEL_NAME)
 USER_MEMORY_MODEL_NAME = os.getenv("USER_MEMORY_MODEL", INTENT_MODEL_NAME)
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -146,6 +147,14 @@ skill_selector_agent = Agent(
     model=SKILL_SELECTOR_MODEL_NAME,
 )
 
+skill_finalizer_agent = Agent(
+    name="email-agent-skill-finalizer",
+    system_prompt=PROMPTS_DIR / "skill_finalizer.md",
+    tools=[],
+    max_iterations=1,
+    model=SKILL_FINALIZER_MODEL_NAME,
+)
+
 user_memory_writer_agent = Agent(
     name="email-agent-user-memory-writer",
     system_prompt=PROMPTS_DIR / "user_memory_writer.md",
@@ -169,6 +178,7 @@ agent = IntentLayerOrchestrator(
     main_agent=main_agent,
     intent_agent=intent_agent,
     skill_selector_agent=skill_selector_agent,
+    skill_finalizer_agent=skill_finalizer_agent,
     skill_executor=skill_executor,
     memory_store=memory_store,
     skill_registry_path=SKILL_REGISTRY_PATH,
