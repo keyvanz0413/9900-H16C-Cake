@@ -1,1 +1,24 @@
+# Skill registry template
+# Each skill declares its own structured input contract.
+#
+# Example:
+# skills:
+#   - name: weekly_email_summary
+#     description: Summarize recent inbox activity.
+#     scope: Read-only summary of recent inbox activity.
+#     used_tools:
+#       - search_emails
+#       - get_unanswered_emails
+#     input_schema:
+#       days:
+#         type: int
+#         required: false
+#         default: 7
+#         description: Number of recent days to summarize.
+#       include_unanswered:
+#         type: bool
+#         required: false
+#         default: true
+#         description: Whether to include unanswered-thread context.
+#     output: A concise weekly inbox summary.
 skills: []

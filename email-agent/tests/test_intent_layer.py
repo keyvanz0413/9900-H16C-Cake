@@ -11,6 +11,7 @@ from intent_layer import (
     IntentLayerOrchestrator,
     MarkdownMemoryStore,
     PythonSkillExecutor,
+    SkillInputFieldSpec,
     SkillLayerError,
     SkillExecutionResult,
     SkillSpec,
@@ -49,18 +50,19 @@ class FakeAgent:
 class FakeSkillExecutor:
     def __init__(self, result: SkillExecutionResult):
         self.result = result
-        self.calls: list[tuple[SkillSpec, str, str, list[DialogueItem], int | None]] = []
+        self.calls: list[tuple[SkillSpec, dict[str, object], str, str, list[DialogueItem], int | None]] = []
 
     def run(
         self,
         skill_spec: SkillSpec,
         *,
+        skill_arguments: dict[str, object],
         current_message: str,
         intent_decision,
         recent_context: list[DialogueItem],
         max_iterations: int | None = None,
     ) -> SkillExecutionResult:
-        self.calls.append((skill_spec, current_message, intent_decision.intent, recent_context, max_iterations))
+        self.calls.append((skill_spec, skill_arguments, current_message, intent_decision.intent, recent_context, max_iterations))
         return self.result
 
 
@@ -99,6 +101,12 @@ def test_load_skill_registry_parses_yaml_shape(tmp_path: Path):
                 "    used_tools:",
                 "      - search_emails",
                 "      - read_memory",
+                "    input_schema:",
+                "      days:",
+                "        type: int",
+                "        required: false",
+                "        default: 7",
+                "        description: Number of recent days to inspect",
                 "    output: email_draft",
             ]
         )
@@ -111,6 +119,16 @@ def test_load_skill_registry_parses_yaml_shape(tmp_path: Path):
     assert len(skills) == 1
     assert skills[0].name == "compose_email_from_context"
     assert skills[0].used_tools == ("search_emails", "read_memory")
+    assert skills[0].input_schema == (
+        SkillInputFieldSpec(
+            name="days",
+            field_type="int",
+            required=False,
+            description="Number of recent days to inspect",
+            has_default=True,
+            default=7,
+        ),
+    )
 
 
 def test_orchestrator_direct_response_skips_main_agent(tmp_path: Path):
@@ -510,6 +528,7 @@ def test_orchestrator_returns_selected_skill_response_without_main_agent(tmp_pat
                 {
                     "should_use_skill": True,
                     "skill_name": "compose_email_from_context",
+                    "skill_arguments": {},
                     "reason": "This request fits the drafting fast path.",
                 }
             )
@@ -555,8 +574,9 @@ def test_orchestrator_returns_selected_skill_response_without_main_agent(tmp_pat
     assert result == "Here is a concise draft you can send."
     assert len(main_agent.calls) == 0
     assert len(skill_executor.calls) == 1
-    executed_skill, current_message, intent_text, _, forwarded_max_iterations = skill_executor.calls[0]
+    executed_skill, skill_arguments, current_message, intent_text, _, forwarded_max_iterations = skill_executor.calls[0]
     assert executed_skill.name == "compose_email_from_context"
+    assert skill_arguments == {}
     assert current_message == "Draft a reply to the client."
     assert intent_text == "Draft an email reply from existing mailbox context."
     assert forwarded_max_iterations == 6
@@ -600,6 +620,7 @@ def test_orchestrator_falls_back_to_main_agent_when_skill_cannot_complete(tmp_pa
                 {
                     "should_use_skill": True,
                     "skill_name": "compose_email_from_context",
+                    "skill_arguments": {},
                     "reason": "This request fits the drafting fast path.",
                 }
             )
@@ -646,6 +667,7 @@ def test_orchestrator_falls_back_to_main_agent_when_skill_cannot_complete(tmp_pa
     assert len(main_agent.calls) == 1
     handoff_prompt, _, _, _, _ = main_agent.calls[0]
     assert "skill_selector: use compose_email_from_context" in handoff_prompt
+    assert 'skill_selector_arguments: {}' in handoff_prompt
     assert "skill_completed: False" in handoff_prompt
     assert "The restricted skill lacked enough mailbox context to finish." in handoff_prompt
 
@@ -726,11 +748,11 @@ def test_python_skill_executor_runs_selected_python_skill_file(tmp_path: Path):
     skill_file.write_text(
         "\n".join(
             [
-                "def execute_skill(*, current_message, intent, recent_context, used_tools, skill_spec):",
-                "    result = used_tools['search_emails'](query=current_message)",
+                "def execute_skill(*, arguments, used_tools, skill_spec):",
+                "    result = used_tools['search_emails'](query=arguments['query'])",
                 "    return {",
                 "        'completed': True,",
-                "        'response': f'Skill response: {result}',",
+                "        'response': f\"Skill response: {result} / days={arguments['days']}\",",
                 "        'reason': f\"Used {skill_spec['name']} directly.\",",
                 "    }",
             ]
@@ -751,7 +773,24 @@ def test_python_skill_executor_runs_selected_python_skill_file(tmp_path: Path):
             scope="Can only draft, never send",
             used_tools=("search_emails",),
             output="email_draft",
+            input_schema=(
+                SkillInputFieldSpec(
+                    name="query",
+                    field_type="string",
+                    required=True,
+                    description="Mailbox query to pass into search_emails",
+                ),
+                SkillInputFieldSpec(
+                    name="days",
+                    field_type="int",
+                    required=False,
+                    description="Number of days to inspect",
+                    has_default=True,
+                    default=7,
+                ),
+            ),
         ),
+        skill_arguments={"query": "Draft a reply."},
         current_message="Draft a reply.",
         intent_decision=type(
             "IntentDecisionLike",
@@ -762,7 +801,7 @@ def test_python_skill_executor_runs_selected_python_skill_file(tmp_path: Path):
     )
 
     assert result.completed is True
-    assert result.response == "Skill response: search:Draft a reply."
+    assert result.response == "Skill response: search:Draft a reply. / days=7"
 
 
 def test_python_skill_executor_fails_when_used_tool_is_missing(tmp_path: Path):
@@ -779,6 +818,7 @@ def test_python_skill_executor_fails_when_used_tool_is_missing(tmp_path: Path):
             used_tools=("search_emails",),
             output="email_draft",
         ),
+        skill_arguments={},
         current_message="Draft a reply.",
         intent_decision=type(
             "IntentDecisionLike",
@@ -797,7 +837,7 @@ def test_python_skill_executor_raises_when_skill_output_is_invalid(tmp_path: Pat
     skill_file.write_text(
         "\n".join(
             [
-                "def execute_skill(*, current_message, intent, recent_context, used_tools, skill_spec):",
+                "def execute_skill(*, arguments, used_tools, skill_spec):",
                 "    return 'not a dict'",
             ]
         )
@@ -819,6 +859,7 @@ def test_python_skill_executor_raises_when_skill_output_is_invalid(tmp_path: Pat
                 used_tools=("search_emails",),
                 output="email_draft",
             ),
+            skill_arguments={},
             current_message="Draft a reply.",
             intent_decision=type(
                 "IntentDecisionLike",
@@ -827,6 +868,188 @@ def test_python_skill_executor_raises_when_skill_output_is_invalid(tmp_path: Pat
             )(),
             recent_context=[],
         )
+        raise AssertionError("Expected SkillLayerError to be raised.")
+    except SkillLayerError:
+        pass
+
+
+def test_skill_selector_validates_and_fills_structured_arguments(tmp_path: Path):
+    registry_path = tmp_path / "registry.yaml"
+    registry_path.write_text(
+        "\n".join(
+            [
+                "skills:",
+                "  - name: weekly_email_summary",
+                "    description: Summarize recent inbox activity",
+                "    scope: Read-only weekly summary",
+                "    used_tools:",
+                "      - search_emails",
+                "    input_schema:",
+                "      days:",
+                "        type: int",
+                "        required: false",
+                "        default: 7",
+                "        description: Number of recent days to summarize",
+                "      include_unanswered:",
+                "        type: bool",
+                "        required: false",
+                "        default: true",
+                "        description: Include unanswered thread context",
+                "    output: weekly summary",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    main_agent = FakeAgent(["should not run"], name="main-agent", max_iterations=15)
+    intent_agent = FakeAgent(
+        [
+            json.dumps(
+                {
+                    "intent": "Summarize recent inbox activity.",
+                    "no_execution_confidence": 2,
+                    "final_response": None,
+                    "reason": "This needs downstream execution.",
+                    "user_update_summary": "No meaningful update.",
+                }
+            )
+        ]
+    )
+    selector_agent = FakeAgent(
+        [
+            json.dumps(
+                {
+                    "should_use_skill": True,
+                    "skill_name": "weekly_email_summary",
+                    "skill_arguments": {"days": "14"},
+                    "reason": "This request matches the weekly summary skill.",
+                }
+            )
+        ]
+    )
+    writer_agent = FakeAgent(
+        [
+            json.dumps(
+                {
+                    "should_update": False,
+                    "profile_markdown": None,
+                    "habits_markdown": None,
+                    "reason": "Nothing new to store.",
+                }
+            )
+        ]
+    )
+    skill_executor = FakeSkillExecutor(
+        SkillExecutionResult(
+            attempted=True,
+            completed=True,
+            response="Structured summary response.",
+            reason="Skill completed.",
+        )
+    )
+
+    store = MarkdownMemoryStore(
+        profile_path=tmp_path / "USER_PROFILE.md",
+        habits_path=tmp_path / "USER_HABITS.md",
+        writer_agent=writer_agent,
+    )
+    orchestrator = IntentLayerOrchestrator(
+        main_agent=main_agent,
+        intent_agent=intent_agent,
+        skill_selector_agent=selector_agent,
+        skill_executor=skill_executor,
+        memory_store=store,
+        skill_registry_path=registry_path,
+    )
+
+    result = orchestrator.input("Give me a weekly inbox summary.")
+
+    assert result == "Structured summary response."
+    executed_skill, skill_arguments, _, _, _, _ = skill_executor.calls[0]
+    assert executed_skill.name == "weekly_email_summary"
+    assert skill_arguments == {"days": 14, "include_unanswered": True}
+
+
+def test_skill_selector_rejects_unknown_structured_arguments(tmp_path: Path):
+    registry_path = tmp_path / "registry.yaml"
+    registry_path.write_text(
+        "\n".join(
+            [
+                "skills:",
+                "  - name: weekly_email_summary",
+                "    description: Summarize recent inbox activity",
+                "    scope: Read-only weekly summary",
+                "    used_tools:",
+                "      - search_emails",
+                "    input_schema:",
+                "      days:",
+                "        type: int",
+                "        required: false",
+                "        default: 7",
+                "        description: Number of recent days to summarize",
+                "    output: weekly summary",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    main_agent = FakeAgent(["should not run"], name="main-agent", max_iterations=15)
+    intent_agent = FakeAgent(
+        [
+            json.dumps(
+                {
+                    "intent": "Summarize recent inbox activity.",
+                    "no_execution_confidence": 2,
+                    "final_response": None,
+                    "reason": "This needs downstream execution.",
+                    "user_update_summary": "No meaningful update.",
+                }
+            )
+        ]
+    )
+    selector_agent = FakeAgent(
+        [
+            json.dumps(
+                {
+                    "should_use_skill": True,
+                    "skill_name": "weekly_email_summary",
+                    "skill_arguments": {"days": 14, "unknown_flag": True},
+                    "reason": "This request matches the weekly summary skill.",
+                }
+            )
+        ]
+    )
+    writer_agent = FakeAgent(
+        [
+            json.dumps(
+                {
+                    "should_update": False,
+                    "profile_markdown": None,
+                    "habits_markdown": None,
+                    "reason": "Nothing new to store.",
+                }
+            )
+        ]
+    )
+
+    store = MarkdownMemoryStore(
+        profile_path=tmp_path / "USER_PROFILE.md",
+        habits_path=tmp_path / "USER_HABITS.md",
+        writer_agent=writer_agent,
+    )
+    orchestrator = IntentLayerOrchestrator(
+        main_agent=main_agent,
+        intent_agent=intent_agent,
+        skill_selector_agent=selector_agent,
+        skill_executor=None,
+        memory_store=store,
+        skill_registry_path=registry_path,
+    )
+
+    try:
+        orchestrator.input("Give me a weekly inbox summary.")
         raise AssertionError("Expected SkillLayerError to be raised.")
     except SkillLayerError:
         pass

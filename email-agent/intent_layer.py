@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import copy
 import importlib.util
 import json
 import inspect
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -80,6 +81,17 @@ class SkillSpec:
     scope: str
     used_tools: tuple[str, ...]
     output: str
+    input_schema: tuple[SkillInputFieldSpec, ...] = ()
+
+
+@dataclass(frozen=True)
+class SkillInputFieldSpec:
+    name: str
+    field_type: str
+    required: bool
+    description: str
+    has_default: bool = False
+    default: Any = None
 
 
 @dataclass(frozen=True)
@@ -87,6 +99,7 @@ class SkillSelection:
     should_use_skill: bool
     skill_name: str | None
     reason: str
+    skill_arguments: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -110,6 +123,7 @@ class SupportsSkillExecution(Protocol):
         self,
         skill_spec: SkillSpec,
         *,
+        skill_arguments: dict[str, Any],
         current_message: str,
         intent_decision: IntentDecision,
         recent_context: list[DialogueItem],
@@ -216,6 +230,295 @@ def build_tool_function_map(tool_sources: list[Any]) -> dict[str, Callable[..., 
     return tool_function_map
 
 
+def _parse_yaml_scalar(raw_value: str) -> Any:
+    value = raw_value.strip()
+    if value in {"", "null", "None"}:
+        return None
+    if value.lower() == "true":
+        return True
+    if value.lower() == "false":
+        return False
+    if value.startswith("[") and value.endswith("]"):
+        inner = value[1:-1].strip()
+        if not inner:
+            return []
+        return [_parse_yaml_scalar(item) for item in inner.split(",")]
+    if value.startswith(("'", '"')) and value.endswith(("'", '"')) and len(value) >= 2:
+        return value[1:-1]
+    try:
+        if value.startswith("0") and value != "0" and not value.startswith("0."):
+            raise ValueError
+        return int(value)
+    except ValueError:
+        pass
+    try:
+        return float(value)
+    except ValueError:
+        return value
+
+
+def _parse_simple_yaml_block(lines: list[tuple[int, str]], index: int, indent: int) -> tuple[Any, int]:
+    if index >= len(lines):
+        return {}, index
+    if lines[index][1].startswith("- "):
+        return _parse_simple_yaml_list(lines, index, indent)
+    return _parse_simple_yaml_mapping(lines, index, indent)
+
+
+def _parse_simple_yaml_mapping(lines: list[tuple[int, str]], index: int, indent: int) -> tuple[dict[str, Any], int]:
+    result: dict[str, Any] = {}
+    while index < len(lines):
+        current_indent, stripped = lines[index]
+        if current_indent < indent:
+            break
+        if current_indent != indent or stripped.startswith("- "):
+            break
+
+        key, separator, remainder = stripped.partition(":")
+        if not separator:
+            index += 1
+            continue
+        key = key.strip()
+        remainder = remainder.strip()
+        index += 1
+
+        if remainder:
+            result[key] = _parse_yaml_scalar(remainder)
+            continue
+
+        if index < len(lines) and lines[index][0] > current_indent:
+            nested, index = _parse_simple_yaml_block(lines, index, lines[index][0])
+            result[key] = nested
+        else:
+            result[key] = None
+
+    return result, index
+
+
+def _parse_simple_yaml_list(lines: list[tuple[int, str]], index: int, indent: int) -> tuple[list[Any], int]:
+    items: list[Any] = []
+    while index < len(lines):
+        current_indent, stripped = lines[index]
+        if current_indent < indent:
+            break
+        if current_indent != indent or not stripped.startswith("- "):
+            break
+
+        remainder = stripped[2:].strip()
+        index += 1
+
+        if not remainder:
+            items.append(None)
+            continue
+
+        if ":" in remainder:
+            key, _, value = remainder.partition(":")
+            item: dict[str, Any] = {}
+            key = key.strip()
+            value = value.strip()
+            if value:
+                item[key] = _parse_yaml_scalar(value)
+            else:
+                item[key] = None
+
+            if index < len(lines) and lines[index][0] > current_indent:
+                nested, index = _parse_simple_yaml_mapping(lines, index, lines[index][0])
+                item.update(nested)
+            items.append(item)
+            continue
+
+        items.append(_parse_yaml_scalar(remainder))
+
+    return items, index
+
+
+def _parse_simple_yaml(raw_text: str) -> dict[str, Any]:
+    lines: list[tuple[int, str]] = []
+    for raw_line in raw_text.splitlines():
+        if not raw_line.strip() or raw_line.lstrip().startswith("#"):
+            continue
+        indent = len(raw_line) - len(raw_line.lstrip(" "))
+        lines.append((indent, raw_line.strip()))
+
+    if not lines:
+        return {}
+
+    parsed, _ = _parse_simple_yaml_block(lines, 0, lines[0][0])
+    if isinstance(parsed, dict):
+        return parsed
+    return {}
+
+
+def _normalize_skill_input_type(raw_type: Any) -> str:
+    normalized = str(raw_type or "").strip().lower()
+    alias_map = {
+        "str": "string",
+        "text": "string",
+        "integer": "int",
+        "number": "float",
+        "boolean": "bool",
+        "array": "list",
+        "dict": "object",
+        "map": "object",
+    }
+    normalized = alias_map.get(normalized, normalized)
+    if normalized in {"string", "int", "float", "bool", "list", "object", "any"}:
+        return normalized
+    return "any"
+
+
+def _coerce_input_field_spec(field_name: str, raw_field: Any) -> SkillInputFieldSpec | None:
+    name = _normalize_text(field_name)
+    if not name:
+        return None
+
+    if isinstance(raw_field, dict):
+        return SkillInputFieldSpec(
+            name=name,
+            field_type=_normalize_skill_input_type(raw_field.get("type")),
+            required=bool(raw_field.get("required")),
+            description=str(raw_field.get("description") or "").strip(),
+            has_default="default" in raw_field,
+            default=raw_field.get("default"),
+        )
+
+    return SkillInputFieldSpec(
+        name=name,
+        field_type="string",
+        required=False,
+        description=str(raw_field or "").strip(),
+    )
+
+
+def _coerce_skill_input_schema(raw_input_schema: Any) -> tuple[SkillInputFieldSpec, ...]:
+    if not isinstance(raw_input_schema, dict):
+        return ()
+
+    fields: list[SkillInputFieldSpec] = []
+    for field_name, raw_field in raw_input_schema.items():
+        spec = _coerce_input_field_spec(str(field_name), raw_field)
+        if spec is not None:
+            fields.append(spec)
+    return tuple(fields)
+
+
+def _coerce_skill_argument_value(value: Any, field_spec: SkillInputFieldSpec, *, error_type: type[Exception]) -> Any:
+    field_name = field_spec.name
+    field_type = field_spec.field_type
+
+    if field_type == "any":
+        return value
+    if value is None:
+        return None
+
+    if field_type == "string":
+        if isinstance(value, (dict, list)):
+            raise error_type(f"Skill argument '{field_name}' must be a string-compatible value.")
+        return str(value)
+
+    if field_type == "int":
+        if isinstance(value, bool):
+            raise error_type(f"Skill argument '{field_name}' must be an int.")
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
+        try:
+            return int(str(value).strip())
+        except (TypeError, ValueError) as exc:
+            raise error_type(f"Skill argument '{field_name}' must be an int.") from exc
+
+    if field_type == "float":
+        if isinstance(value, bool):
+            raise error_type(f"Skill argument '{field_name}' must be a float.")
+        if isinstance(value, (int, float)):
+            return float(value)
+        try:
+            return float(str(value).strip())
+        except (TypeError, ValueError) as exc:
+            raise error_type(f"Skill argument '{field_name}' must be a float.") from exc
+
+    if field_type == "bool":
+        if isinstance(value, bool):
+            return value
+        normalized = str(value).strip().lower()
+        if normalized in {"true", "1", "yes", "y"}:
+            return True
+        if normalized in {"false", "0", "no", "n"}:
+            return False
+        raise error_type(f"Skill argument '{field_name}' must be a bool.")
+
+    if field_type == "list":
+        if not isinstance(value, list):
+            raise error_type(f"Skill argument '{field_name}' must be a list.")
+        return value
+
+    if field_type == "object":
+        if not isinstance(value, dict):
+            raise error_type(f"Skill argument '{field_name}' must be an object.")
+        return value
+
+    return value
+
+
+def validate_skill_arguments(
+    skill_spec: SkillSpec,
+    raw_arguments: Any,
+    *,
+    error_type: type[Exception],
+) -> dict[str, Any]:
+    if raw_arguments is None:
+        raw_arguments = {}
+    if not isinstance(raw_arguments, dict):
+        raise error_type(f"Skill '{skill_spec.name}' requires skill_arguments to be a JSON object.")
+
+    fields_by_name = {field.name: field for field in skill_spec.input_schema}
+    unknown_fields = sorted(set(raw_arguments.keys()) - set(fields_by_name.keys()))
+    if unknown_fields:
+        raise error_type(
+            f"Skill '{skill_spec.name}' received unknown skill_arguments: {', '.join(unknown_fields)}"
+        )
+
+    validated: dict[str, Any] = {}
+    for field_spec in skill_spec.input_schema:
+        if field_spec.name in raw_arguments:
+            validated[field_spec.name] = _coerce_skill_argument_value(
+                raw_arguments[field_spec.name],
+                field_spec,
+                error_type=error_type,
+            )
+            continue
+
+        if field_spec.has_default:
+            validated[field_spec.name] = copy.deepcopy(field_spec.default)
+            continue
+
+        if field_spec.required:
+            raise error_type(
+                f"Skill '{skill_spec.name}' is missing required skill argument: {field_spec.name}"
+            )
+
+    return validated
+
+
+def _format_skill_input_schema_for_prompt(skill_spec: SkillSpec) -> str:
+    if not skill_spec.input_schema:
+        return "{}"
+
+    lines: list[str] = []
+    for field_spec in skill_spec.input_schema:
+        metadata = [
+            f"type={field_spec.field_type}",
+            f"required={str(field_spec.required).lower()}",
+        ]
+        if field_spec.has_default:
+            metadata.append(f"default={json.dumps(field_spec.default, ensure_ascii=False)}")
+        if field_spec.description:
+            metadata.append(f"description={field_spec.description}")
+        lines.append(f"    - {field_spec.name}: " + "; ".join(metadata))
+    return "\n".join(lines)
+
+
 def _coerce_skill_spec(raw_skill: dict[str, Any]) -> SkillSpec | None:
     name = _normalize_text(raw_skill.get("name"))
     if not name:
@@ -231,6 +534,7 @@ def _coerce_skill_spec(raw_skill: dict[str, Any]) -> SkillSpec | None:
         scope=str(raw_skill.get("scope") or "").strip(),
         used_tools=tuple(str(tool).strip() for tool in used_tools if str(tool).strip()),
         output=str(raw_skill.get("output") or "").strip(),
+        input_schema=_coerce_skill_input_schema(raw_skill.get("input_schema")),
     )
 
 
@@ -251,67 +555,10 @@ def load_skill_registry(path: Path) -> list[SkillSpec]:
         specs = [_coerce_skill_spec(raw_skill) for raw_skill in raw_skills if isinstance(raw_skill, dict)]
         return [spec for spec in specs if spec is not None]
 
-    skills: list[SkillSpec] = []
-    current: dict[str, Any] | None = None
-    reading_used_tools = False
-
-    for raw_line in raw_text.splitlines():
-        if not raw_line.strip() or raw_line.lstrip().startswith("#"):
-            continue
-
-        indent = len(raw_line) - len(raw_line.lstrip(" "))
-        stripped = raw_line.strip()
-
-        if stripped == "skills:":
-            continue
-
-        if indent == 2 and stripped.startswith("- "):
-            if current is not None:
-                spec = _coerce_skill_spec(current)
-                if spec is not None:
-                    skills.append(spec)
-            current = {"used_tools": []}
-            reading_used_tools = False
-            remainder = stripped[2:].strip()
-            if remainder and ":" in remainder:
-                key, value = remainder.split(":", 1)
-                current[key.strip()] = _parse_scalar(value)
-            continue
-
-        if current is None:
-            continue
-
-        if indent == 4 and ":" in stripped:
-            key, value = stripped.split(":", 1)
-            key = key.strip()
-            value = value.strip()
-            if key == "used_tools":
-                reading_used_tools = True
-                if value == "[]":
-                    current["used_tools"] = []
-                    reading_used_tools = False
-                elif value.startswith("[") and value.endswith("]"):
-                    inner = value[1:-1]
-                    current["used_tools"] = [
-                        _parse_scalar(item) for item in inner.split(",") if _parse_scalar(item)
-                    ]
-                    reading_used_tools = False
-                else:
-                    current.setdefault("used_tools", [])
-            else:
-                reading_used_tools = False
-                current[key] = _parse_scalar(value)
-            continue
-
-        if reading_used_tools and indent >= 6 and stripped.startswith("- "):
-            current.setdefault("used_tools", []).append(_parse_scalar(stripped[2:]))
-
-    if current is not None:
-        spec = _coerce_skill_spec(current)
-        if spec is not None:
-            skills.append(spec)
-
-    return skills
+    payload = _parse_simple_yaml(raw_text)
+    raw_skills = payload.get("skills") or []
+    specs = [_coerce_skill_spec(raw_skill) for raw_skill in raw_skills if isinstance(raw_skill, dict)]
+    return [spec for spec in specs if spec is not None]
 
 
 class MarkdownMemoryStore:
@@ -393,12 +640,13 @@ class PythonSkillExecutor:
         self,
         skill_spec: SkillSpec,
         *,
+        skill_arguments: dict[str, Any],
         current_message: str,
         intent_decision: IntentDecision,
         recent_context: list[DialogueItem],
         max_iterations: int | None = None,
     ) -> SkillExecutionResult:
-        del max_iterations
+        del current_message, intent_decision, recent_context, max_iterations
         resolved_tools: dict[str, Callable[..., Any]] = {}
         missing_tools: list[str] = []
 
@@ -415,26 +663,36 @@ class PythonSkillExecutor:
                 completed=False,
                 response=None,
                 reason=(
-                    f"Skill '{skill_spec.name}' could not start because these allowed tools are unavailable: "
+                    f"Skill '{skill_spec.name}' could not start because these required tools are unavailable: "
                     + ", ".join(missing_tools)
                 ),
             )
 
         try:
+            validated_arguments = validate_skill_arguments(
+                skill_spec,
+                skill_arguments,
+                error_type=SkillLayerError,
+            )
             execute_skill = self._load_execute_skill(skill_spec)
             payload = execute_skill(
-                current_message=current_message.strip(),
-                intent=intent_decision.intent,
-                recent_context=[
-                    {"role": item.role, "content": item.content}
-                    for item in recent_context
-                ],
+                arguments=validated_arguments,
                 used_tools=resolved_tools,
                 skill_spec={
                     "name": skill_spec.name,
                     "description": skill_spec.description,
                     "scope": skill_spec.scope,
                     "output": skill_spec.output,
+                    "input_schema": [
+                        {
+                            "name": field_spec.name,
+                            "type": field_spec.field_type,
+                            "required": field_spec.required,
+                            "description": field_spec.description,
+                            **({"default": copy.deepcopy(field_spec.default)} if field_spec.has_default else {}),
+                        }
+                        for field_spec in skill_spec.input_schema
+                    ],
                 },
             )
         except Exception as exc:
@@ -492,7 +750,9 @@ class PythonSkillExecutor:
         spec.loader.exec_module(module)
         execute_skill = getattr(module, "execute_skill", None)
         if not callable(execute_skill):
-            raise SkillLayerError(f"Skill '{skill_spec.name}' must expose a callable execute_skill(...)")
+            raise SkillLayerError(
+                f"Skill '{skill_spec.name}' must expose a callable execute_skill(arguments=..., used_tools=..., skill_spec=...)"
+            )
 
         self._execute_cache[cache_key] = execute_skill
         return execute_skill
@@ -571,6 +831,7 @@ class IntentLayerOrchestrator:
                     selected_skill=selection.skill_name or "(none)",
                     should_use_skill=selection.should_use_skill,
                     skill_name=selection.skill_name,
+                    skill_arguments=selection.skill_arguments,
                     reason=selection.reason,
                     registered_skills=len(available_skills),
                 )
@@ -583,9 +844,11 @@ class IntentLayerOrchestrator:
                             "skill_execution_started",
                             skill_name=skill_spec.name,
                             used_tools=", ".join(skill_spec.used_tools),
+                            skill_arguments=selection.skill_arguments,
                         )
                         skill_execution_result = self._skill_executor.run(
                             skill_spec,
+                            skill_arguments=selection.skill_arguments,
                             current_message=prompt,
                             intent_decision=intent_decision,
                             recent_context=recent_context,
@@ -611,6 +874,7 @@ class IntentLayerOrchestrator:
                         intent=intent_decision.intent,
                         via="skill_fallback" if skill_execution_result is not None else "direct_handoff",
                         skill_name=selection.skill_name,
+                        skill_arguments=selection.skill_arguments,
                     )
                     response = self._run_main_agent(
                         user_message=prompt,
@@ -793,6 +1057,8 @@ class IntentLayerOrchestrator:
             ]
             if spec.used_tools:
                 lines.append(f"  used_tools: {', '.join(spec.used_tools)}")
+            lines.append("  input_schema:")
+            lines.append(_format_skill_input_schema_for_prompt(spec))
             if spec.output:
                 lines.append(f"  output: {spec.output}")
             skills_block.append("\n".join(lines))
@@ -820,20 +1086,30 @@ class IntentLayerOrchestrator:
         should_use_skill = bool(payload.get("should_use_skill"))
         skill_name_raw = payload.get("skill_name")
         skill_name = None if skill_name_raw is None else str(skill_name_raw).strip()
-        allowed_skill_names = {spec.name for spec in available_skills}
+        skills_by_name = {spec.name: spec for spec in available_skills}
+        skill_arguments = payload.get("skill_arguments")
+        if not isinstance(skill_arguments, dict):
+            raise SkillLayerError("Skill selector must return skill_arguments as a JSON object.")
         reason = _require_non_empty_string(payload.get("reason"), field_name="reason", error_type=SkillLayerError)
 
         if should_use_skill:
             if not skill_name:
                 raise SkillLayerError("Skill selector returned should_use_skill=true without a skill_name.")
-            if skill_name not in allowed_skill_names:
+            if skill_name not in skills_by_name:
                 raise SkillLayerError(f"Skill selector returned unknown skill_name: {skill_name}")
-            return SkillSelection(True, skill_name, reason)
+            validated_arguments = validate_skill_arguments(
+                skills_by_name[skill_name],
+                skill_arguments,
+                error_type=SkillLayerError,
+            )
+            return SkillSelection(True, skill_name, reason, validated_arguments)
 
         if skill_name is not None:
             raise SkillLayerError("Skill selector returned a skill_name even though should_use_skill=false.")
+        if skill_arguments:
+            raise SkillLayerError("Skill selector returned non-empty skill_arguments even though should_use_skill=false.")
 
-        return SkillSelection(False, None, reason)
+        return SkillSelection(False, None, reason, {})
 
     def _run_main_agent(
         self,
@@ -855,6 +1131,7 @@ class IntentLayerOrchestrator:
             f"no_execution_confidence: {intent_decision.no_execution_confidence}",
             f"skill_selector: {'use ' + skill_selection.skill_name if skill_selection.should_use_skill and skill_selection.skill_name else 'route to main agent'}",
             f"skill_selector_reason: {skill_selection.reason}",
+            f"skill_selector_arguments: {json.dumps(skill_selection.skill_arguments, ensure_ascii=False, sort_keys=True)}",
         ]
         if skill_execution_result is not None:
             handoff_sections.extend(
