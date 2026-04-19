@@ -8,8 +8,7 @@ from intent_layer import PythonSkillExecutor, SkillInputFieldSpec, SkillSpec, bu
 
 
 class UnsubscribeExecuteToolBox:
-    def __init__(self, message_kind: str):
-        self.message_kind = message_kind
+    def __init__(self):
         self.one_click_status = "confirmed"
         self.one_click_evidence = ""
         self.calls: list[tuple[str, dict[str, object]]] = []
@@ -19,70 +18,89 @@ class UnsubscribeExecuteToolBox:
         with self._lock:
             self.calls.append((tool_name, kwargs))
 
+    def search_emails(self, query: str, max_results: int = 10) -> str:
+        self._record("search_emails", query=query, max_results=max_results)
+        return (
+            "Found 3 email(s):\n\n"
+            "1. From: Deals <deals@example.com>\n"
+            "   Subject: Weekly deals\n"
+            "   ID: unsub-001\n\n"
+            "2. From: Product <product@vendor.test>\n"
+            "   Subject: Product update\n"
+            "   ID: unsub-002\n\n"
+            "3. From: Alerts <alerts@service.test>\n"
+            "   Subject: Account notice\n"
+            "   ID: unsub-003\n"
+        )
+
     def get_unsubscribe_info(self, email_ids, max_manual_links: int = 5) -> str:
         self._record("get_unsubscribe_info", email_ids=email_ids, max_manual_links=max_manual_links)
-        email_id = email_ids[0]
-        if self.message_kind == "one_click":
-            unsubscribe = {
-                "method": "one_click",
-                "options": {
-                    "one_click": {
-                        "url": "https://example.com/one-click?id=123",
-                        "request_payload": {"url": "https://example.com/one-click?id=123"},
-                    },
-                    "website": {
-                        "manual_links": [
-                            {
-                                "url": "https://example.com/manual-unsubscribe?token=abc",
-                                "label": "Click here to unsubscribe",
-                                "source": "email_body",
-                            }
-                        ]
-                    },
-                },
-            }
-        elif self.message_kind == "mailto":
-            unsubscribe = {
-                "method": "mailto",
-                "options": {
-                    "mailto": {
-                        "url": "mailto:unsubscribe@example.com?subject=unsubscribe",
-                        "send_payload": {
-                            "to": "unsubscribe@example.com",
-                            "subject": "unsubscribe",
-                            "body": "",
+        payloads = {
+            "unsub-001": {
+                "email_id": "unsub-001",
+                "unsubscribe": {
+                    "method": "one_click",
+                    "options": {
+                        "one_click": {
+                            "url": "https://example.com/one-click?id=123",
+                            "request_payload": {"url": "https://example.com/one-click?id=123"},
                         },
-                    }
+                        "website": {
+                            "manual_links": [
+                                {
+                                    "url": "https://example.com/manual-unsubscribe?token=abc",
+                                    "label": "Click here to unsubscribe",
+                                    "source": "email_body",
+                                }
+                            ]
+                        },
+                    },
                 },
-            }
-        else:
-            unsubscribe = {
-                "method": "website",
-                "options": {
-                    "website": {
-                        "url": "https://service.example.com/preferences",
-                        "manual_links": [
-                            {
-                                "url": "https://service.example.com/preferences",
-                                "label": "Manage preferences",
-                                "source": "list_unsubscribe_header",
-                            }
-                        ],
-                    }
+                "error": "",
+            },
+            "unsub-002": {
+                "email_id": "unsub-002",
+                "unsubscribe": {
+                    "method": "mailto",
+                    "options": {
+                        "mailto": {
+                            "url": "mailto:unsubscribe@example.com?subject=unsubscribe",
+                            "send_payload": {
+                                "to": "unsubscribe@example.com",
+                                "subject": "unsubscribe",
+                                "body": "",
+                            },
+                        }
+                    },
                 },
-            }
+                "error": "",
+            },
+            "unsub-003": {
+                "email_id": "unsub-003",
+                "unsubscribe": {
+                    "method": "website",
+                    "options": {
+                        "website": {
+                            "url": "https://service.example.com/preferences",
+                            "manual_links": [
+                                {
+                                    "url": "https://service.example.com/preferences",
+                                    "label": "Manage preferences",
+                                    "source": "list_unsubscribe_header",
+                                }
+                            ],
+                        }
+                    },
+                },
+                "error": "",
+            },
+        }
         return json.dumps(
             {
-                "items": [
-                    {
-                        "email_id": email_id,
-                        "unsubscribe": unsubscribe,
-                        "error": "",
-                    }
-                ],
+                "items": [payloads[email_id] for email_id in email_ids],
                 "summary": {
-                    "requested_count": 1,
-                    "analyzed_count": 1,
+                    "requested_count": len(email_ids),
+                    "analyzed_count": len(email_ids),
                     "error_count": 0,
                 },
                 "error": "",
@@ -126,6 +144,7 @@ def _spec() -> SkillSpec:
         description="Execute unsubscribe.",
         scope="Confirmed unsubscribe only.",
         used_tools=(
+            "search_emails",
             "get_unsubscribe_info",
             "post_one_click_unsubscribe",
             "send",
@@ -133,10 +152,20 @@ def _spec() -> SkillSpec:
         output="execution result",
         input_schema=(
             SkillInputFieldSpec(
-                name="email_id",
-                field_type="string",
-                required=True,
-                description="Gmail message id.",
+                name="days",
+                field_type="int",
+                required=False,
+                description="Number of recent days to inspect.",
+                has_default=True,
+                default=30,
+            ),
+            SkillInputFieldSpec(
+                name="max_results",
+                field_type="int",
+                required=False,
+                description="Maximum number of emails to inspect.",
+                has_default=True,
+                default=100,
             ),
             SkillInputFieldSpec(
                 name="method",
@@ -159,104 +188,90 @@ def _spec() -> SkillSpec:
 
 
 def test_unsubscribe_execute_requires_confirmation_before_side_effects():
-    toolbox = UnsubscribeExecuteToolBox("one_click")
+    toolbox = UnsubscribeExecuteToolBox()
     result = _executor_for(toolbox).run(
         _spec(),
-        skill_arguments={"email_id": "msg-001", "confirmed": False},
-        current_message="Unsubscribe from this.",
-        intent_decision=type("Intent", (), {"intent": "Unsubscribe from a sender."})(),
+        skill_arguments={"days": 30, "max_results": 20, "confirmed": False},
+        current_message="Unsubscribe from these newsletters.",
+        intent_decision=type("Intent", (), {"intent": "Unsubscribe from recent subscription emails."})(),
         recent_context=[],
     )
 
     assert result.completed is True
     assert result.response is not None
-    assert "status: needs_confirmation" in result.response
-    assert [name for name, _ in toolbox.calls] == ["get_unsubscribe_info"]
+    assert "[UNSUBSCRIBE_EXECUTE_BUNDLE]" in result.response
+    assert '"needs_confirmation": 3' in result.response
+    assert [name for name, _ in toolbox.calls] == ["search_emails", "get_unsubscribe_info"]
 
 
-def test_unsubscribe_execute_one_click_posts_after_confirmation():
-    toolbox = UnsubscribeExecuteToolBox("one_click")
+def test_unsubscribe_execute_runs_batch_execution_after_confirmation():
+    toolbox = UnsubscribeExecuteToolBox()
     result = _executor_for(toolbox).run(
         _spec(),
-        skill_arguments={"email_id": "msg-001", "confirmed": True},
-        current_message="Yes, unsubscribe.",
-        intent_decision=type("Intent", (), {"intent": "Confirm unsubscribe."})(),
+        skill_arguments={"days": 30, "max_results": 20, "confirmed": True},
+        current_message="Yes, unsubscribe them.",
+        intent_decision=type("Intent", (), {"intent": "Confirm batch unsubscribe."})(),
         recent_context=[],
     )
 
     assert result.completed is True
     assert result.response is not None
-    assert "status: confirmed" in result.response
-    assert "gmail_subscription_ui_status: not_updated_by_agent" in result.response
+    assert '"status": "confirmed"' in result.response
+    assert '"status": "request_sent"' in result.response
+    assert '"status": "manual_link_available"' in result.response
     assert ("post_one_click_unsubscribe", {"url": "https://example.com/one-click?id=123"}) in toolbox.calls
+    assert ("send", {"to": "unsubscribe@example.com", "subject": "unsubscribe", "body": "unsubscribe"}) in toolbox.calls
 
 
 def test_unsubscribe_execute_preserves_one_click_request_accepted_status():
-    toolbox = UnsubscribeExecuteToolBox("one_click")
+    toolbox = UnsubscribeExecuteToolBox()
     toolbox.one_click_status = "request_accepted"
     result = _executor_for(toolbox).run(
         _spec(),
-        skill_arguments={"email_id": "msg-001", "confirmed": True},
-        current_message="Yes, unsubscribe.",
-        intent_decision=type("Intent", (), {"intent": "Confirm unsubscribe."})(),
+        skill_arguments={"days": 30, "max_results": 20, "confirmed": True},
+        current_message="Yes, unsubscribe them.",
+        intent_decision=type("Intent", (), {"intent": "Confirm batch unsubscribe."})(),
         recent_context=[],
     )
 
     assert result.completed is True
     assert result.response is not None
-    assert "status: request_accepted" in result.response
-    assert "sender_unsubscribe_status: request_accepted" in result.response
-    assert "gmail_subscription_ui_status: not_updated_by_agent" in result.response
+    assert '"request_accepted": 1' in result.response
+    assert '"sender_unsubscribe_status": "request_accepted"' in result.response
 
 
 def test_unsubscribe_execute_returns_manual_link_when_one_click_fails():
-    toolbox = UnsubscribeExecuteToolBox("one_click")
+    toolbox = UnsubscribeExecuteToolBox()
     toolbox.one_click_status = "failed"
     toolbox.one_click_evidence = "HTTP 403 response received."
     result = _executor_for(toolbox).run(
         _spec(),
-        skill_arguments={"email_id": "msg-001", "confirmed": True},
-        current_message="Yes, unsubscribe.",
-        intent_decision=type("Intent", (), {"intent": "Confirm unsubscribe."})(),
+        skill_arguments={"days": 30, "max_results": 20, "confirmed": True},
+        current_message="Yes, unsubscribe them.",
+        intent_decision=type("Intent", (), {"intent": "Confirm batch unsubscribe."})(),
         recent_context=[],
     )
 
     assert result.completed is True
     assert result.response is not None
-    assert "status: manual_link_available" in result.response
+    assert '"manual_link_available": 2' in result.response
     assert "https://example.com/manual-unsubscribe?token=abc" in result.response
-    assert "get_unsubscribe_info" in [name for name, _ in toolbox.calls]
-
-
-def test_unsubscribe_execute_mailto_sends_request_but_not_confirmed():
-    toolbox = UnsubscribeExecuteToolBox("mailto")
-    result = _executor_for(toolbox).run(
-        _spec(),
-        skill_arguments={"email_id": "msg-002", "confirmed": True},
-        current_message="Yes, send the unsubscribe request.",
-        intent_decision=type("Intent", (), {"intent": "Confirm unsubscribe."})(),
-        recent_context=[],
-    )
-
-    assert result.completed is True
-    assert result.response is not None
-    assert "status: request_sent" in result.response
-    assert ("send", {"to": "unsubscribe@example.com", "subject": "unsubscribe", "body": "unsubscribe"}) in toolbox.calls
-
-
-def test_unsubscribe_execute_website_returns_manual_link_without_opening_url():
-    toolbox = UnsubscribeExecuteToolBox("website")
-    result = _executor_for(toolbox).run(
-        _spec(),
-        skill_arguments={"email_id": "msg-003", "confirmed": True},
-        current_message="Yes, unsubscribe.",
-        intent_decision=type("Intent", (), {"intent": "Confirm unsubscribe."})(),
-        recent_context=[],
-    )
-
-    assert result.completed is True
-    assert result.response is not None
-    assert "status: manual_link_available" in result.response
     assert "https://service.example.com/preferences" in result.response
+
+
+def test_unsubscribe_execute_requested_method_filters_candidates():
+    toolbox = UnsubscribeExecuteToolBox()
+    result = _executor_for(toolbox).run(
+        _spec(),
+        skill_arguments={"days": 30, "max_results": 20, "confirmed": True, "method": "mailto"},
+        current_message="Use mailto only.",
+        intent_decision=type("Intent", (), {"intent": "Confirm mailto-only unsubscribe."})(),
+        recent_context=[],
+    )
+
+    assert result.completed is True
+    assert result.response is not None
+    assert ("send", {"to": "unsubscribe@example.com", "subject": "unsubscribe", "body": "unsubscribe"}) in toolbox.calls
     assert "post_one_click_unsubscribe" not in [name for name, _ in toolbox.calls]
-    assert "send" not in [name for name, _ in toolbox.calls]
+    assert '"failed": 2' in result.response
+    assert '"request_sent": 1' in result.response

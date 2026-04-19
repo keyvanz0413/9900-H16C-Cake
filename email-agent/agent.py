@@ -26,8 +26,12 @@ from intent_layer import (
 
 MODEL_NAME = os.getenv("AGENT_MODEL", "co/claude-sonnet-4-5")
 INTENT_MODEL_NAME = os.getenv("INTENT_LAYER_MODEL", MODEL_NAME)
-SKILL_SELECTOR_MODEL_NAME = os.getenv("SKILL_SELECTOR_MODEL", INTENT_MODEL_NAME)
-SKILL_FINALIZER_MODEL_NAME = os.getenv("SKILL_FINALIZER_MODEL", INTENT_MODEL_NAME)
+PLANNER_MODEL_NAME = os.getenv("PLANNER_MODEL", INTENT_MODEL_NAME)
+SKILL_INPUT_RESOLVER_MODEL_NAME = os.getenv(
+    "SKILL_INPUT_RESOLVER_MODEL",
+    PLANNER_MODEL_NAME,
+)
+FINALIZER_MODEL_NAME = os.getenv("FINALIZER_MODEL", os.getenv("SKILL_FINALIZER_MODEL", INTENT_MODEL_NAME))
 WRITING_STYLE_MODEL_NAME = os.getenv("WRITING_STYLE_MODEL", INTENT_MODEL_NAME)
 USER_MEMORY_MODEL_NAME = os.getenv("USER_MEMORY_MODEL", INTENT_MODEL_NAME)
 AGENT_TIMEZONE = os.getenv("AGENT_TIMEZONE", os.getenv("TZ", "Australia/Sydney"))
@@ -116,14 +120,6 @@ elif has_outlook:
 if not tools:
     print("\n⚠️  No email account connected. Use /link-gmail or /link-outlook to connect.\n")
 
-# Select prompt based on linked provider
-if has_gmail:
-    system_prompt = PROMPTS_DIR / "gmail_agent.md"
-elif has_outlook:
-    system_prompt = PROMPTS_DIR / "outlook_agent.md"
-else:
-    system_prompt = PROMPTS_DIR / "gmail_agent.md"  # Default
-
 # Create init sub-agent for CRM database setup
 init_crm = Agent(
     name="crm-init",
@@ -169,14 +165,14 @@ if has_gmail:
 # Create main execution agent
 main_agent = Agent(
     name="email-agent",
-    system_prompt=system_prompt,
+    system_prompt=PROMPTS_DIR / "main_agent_step.md",
     tools=tools,
     plugins=plugins,
     max_iterations=15,
     model=MODEL_NAME,
 )
 
-# Intent and routing helper agents are lightweight single-step LLM calls.
+# Intent and orchestration helper agents are lightweight single-step LLM calls.
 intent_agent = Agent(
     name="email-agent-intent-layer",
     system_prompt=PROMPTS_DIR / "intent_layer.md",
@@ -185,20 +181,28 @@ intent_agent = Agent(
     model=INTENT_MODEL_NAME,
 )
 
-skill_selector_agent = Agent(
-    name="email-agent-skills-selector",
-    system_prompt=PROMPTS_DIR / "skills_selector.md",
+planner_agent = Agent(
+    name="email-agent-planner",
+    system_prompt=PROMPTS_DIR / "planner.md",
     tools=[],
     max_iterations=1,
-    model=SKILL_SELECTOR_MODEL_NAME,
+    model=PLANNER_MODEL_NAME,
 )
 
-skill_finalizer_agent = Agent(
-    name="email-agent-skill-finalizer",
-    system_prompt=PROMPTS_DIR / "skill_finalizer.md",
+skill_input_resolver_agent = Agent(
+    name="email-agent-skill-input-resolver",
+    system_prompt=PROMPTS_DIR / "skill_input_resolver.md",
     tools=[],
     max_iterations=1,
-    model=SKILL_FINALIZER_MODEL_NAME,
+    model=SKILL_INPUT_RESOLVER_MODEL_NAME,
+)
+
+finalizer_agent = Agent(
+    name="email-agent-finalizer",
+    system_prompt=PROMPTS_DIR / "finalizer.md",
+    tools=[],
+    max_iterations=1,
+    model=FINALIZER_MODEL_NAME,
 )
 
 user_memory_writer_agent = Agent(
@@ -239,8 +243,9 @@ skill_executor = PythonSkillExecutor(
 agent = IntentLayerOrchestrator(
     main_agent=main_agent,
     intent_agent=intent_agent,
-    skill_selector_agent=skill_selector_agent,
-    skill_finalizer_agent=skill_finalizer_agent,
+    planner_agent=planner_agent,
+    skill_input_resolver_agent=skill_input_resolver_agent,
+    finalizer_agent=finalizer_agent,
     skill_executor=skill_executor,
     memory_store=memory_store,
     skill_registry_path=SKILL_REGISTRY_PATH,

@@ -125,6 +125,31 @@ class SkillExecutionResult:
     reason: str
 
 
+@dataclass(frozen=True)
+class PlannedStep:
+    step_id: str
+    step_type: str
+    name: str | None
+    goal: str
+    reads: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ExecutionPlan:
+    steps: tuple[PlannedStep, ...]
+    reason: str
+
+
+@dataclass(frozen=True)
+class StepExecutionResult:
+    step_id: str
+    step_type: str
+    name: str | None
+    status: str
+    artifact: dict[str, Any]
+    reason: str
+
+
 class SupportsSkillExecution(Protocol):
     def run(
         self,
@@ -134,6 +159,8 @@ class SupportsSkillExecution(Protocol):
         current_message: str,
         intent_decision: IntentDecision,
         recent_context: list[DialogueItem],
+        step_goal: str | None = None,
+        read_results: list[dict[str, Any]] | None = None,
         max_iterations: int | None = None,
     ) -> SkillExecutionResult:
         ...
@@ -169,15 +196,18 @@ def _extract_json_payload(raw_text: str) -> dict[str, Any]:
     except json.JSONDecodeError:
         pass
 
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        raise ValueError("No JSON object found in LLM response.")
+    decoder = json.JSONDecoder()
+    for index, character in enumerate(text):
+        if character != "{":
+            continue
+        try:
+            payload, _ = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            return payload
 
-    payload = json.loads(text[start : end + 1])
-    if not isinstance(payload, dict):
-        raise ValueError("LLM response JSON was not an object.")
-    return payload
+    raise ValueError("No JSON object found in LLM response.")
 
 
 def _require_non_empty_string(value: Any, *, field_name: str, error_type: type[Exception]) -> str:
@@ -208,6 +238,17 @@ def format_context(items: list[DialogueItem]) -> str:
     if not items:
         return "(empty)"
     return "\n".join(item.as_context_line() for item in items)
+
+
+def serialize_step_result(step_result: StepExecutionResult) -> dict[str, Any]:
+    return {
+        "step_id": step_result.step_id,
+        "type": step_result.step_type,
+        **({"name": step_result.name} if step_result.name else {}),
+        "status": step_result.status,
+        "artifact": copy.deepcopy(step_result.artifact),
+        "reason": step_result.reason,
+    }
 
 
 def _parse_scalar(raw_value: str) -> str:
@@ -653,6 +694,8 @@ class PythonSkillExecutor:
         current_message: str,
         intent_decision: IntentDecision,
         recent_context: list[DialogueItem],
+        step_goal: str | None = None,
+        read_results: list[dict[str, Any]] | None = None,
         max_iterations: int | None = None,
     ) -> SkillExecutionResult:
         del current_message, intent_decision, recent_context, max_iterations
@@ -710,6 +753,22 @@ class PythonSkillExecutor:
                 or any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in execute_skill_signature.parameters.values())
             ):
                 execute_skill_kwargs["skill_runtime"] = self._skill_runtime
+            if (
+                step_goal is not None
+                and (
+                    "step_goal" in execute_skill_signature.parameters
+                    or any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in execute_skill_signature.parameters.values())
+                )
+            ):
+                execute_skill_kwargs["step_goal"] = step_goal
+            if (
+                read_results is not None
+                and (
+                    "read_results" in execute_skill_signature.parameters
+                    or any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in execute_skill_signature.parameters.values())
+                )
+            ):
+                execute_skill_kwargs["read_results"] = copy.deepcopy(read_results)
 
             payload = execute_skill(
                 **execute_skill_kwargs,
@@ -783,8 +842,9 @@ class IntentLayerOrchestrator:
         *,
         main_agent: SupportsInput,
         intent_agent: SupportsInput,
-        skill_selector_agent: SupportsInput,
-        skill_finalizer_agent: SupportsInput,
+        planner_agent: SupportsInput,
+        skill_input_resolver_agent: SupportsInput,
+        finalizer_agent: SupportsInput,
         skill_executor: SupportsSkillExecution | None,
         memory_store: MarkdownMemoryStore,
         skill_registry_path: Path,
@@ -793,8 +853,9 @@ class IntentLayerOrchestrator:
     ):
         self._main_agent = main_agent
         self._intent_agent = intent_agent
-        self._skill_selector_agent = skill_selector_agent
-        self._skill_finalizer_agent = skill_finalizer_agent
+        self._planner_agent = planner_agent
+        self._skill_input_resolver_agent = skill_input_resolver_agent
+        self._finalizer_agent = finalizer_agent
         self._skill_executor = skill_executor
         self._memory_store = memory_store
         self._skill_registry_path = skill_registry_path
@@ -845,100 +906,49 @@ class IntentLayerOrchestrator:
                 response = intent_decision.final_response or ""
             else:
                 available_skills = load_skill_registry(self._skill_registry_path)
-                skills_by_name = {skill.name: skill for skill in available_skills}
-                selection = self._select_skill(
+                execution_plan = self._plan_execution(
                     intent_decision=intent_decision,
                     current_message=prompt,
+                    older_context=older_context,
                     recent_context=recent_context,
                     available_skills=available_skills,
                 )
                 self._log_route(
-                    "skill_selection",
+                    "planner",
                     confidence=intent_decision.no_execution_confidence,
                     intent=intent_decision.intent,
-                    skill_selected=selection.should_use_skill,
-                    selected_skill=selection.skill_name or "(none)",
-                    should_use_skill=selection.should_use_skill,
-                    skill_name=selection.skill_name,
-                    skill_arguments=selection.skill_arguments,
-                    reason=selection.reason,
+                    reason=execution_plan.reason,
+                    step_count=len(execution_plan.steps),
+                    steps=[self._serialize_plan_step(step) for step in execution_plan.steps],
                     registered_skills=len(available_skills),
                 )
-                skill_execution_result: SkillExecutionResult | None = None
-                skill_spec: SkillSpec | None = None
-
-                if selection.should_use_skill and self._skill_executor is not None and selection.skill_name:
-                    skill_spec = skills_by_name.get(selection.skill_name)
-                    if skill_spec is not None:
-                        self._log_route(
-                            "skill_execution_started",
-                            skill_name=skill_spec.name,
-                            used_tools=", ".join(skill_spec.used_tools),
-                            skill_arguments=selection.skill_arguments,
-                        )
-                        skill_execution_result = self._skill_executor.run(
-                            skill_spec,
-                            skill_arguments=selection.skill_arguments,
-                            current_message=prompt,
-                            intent_decision=intent_decision,
-                            recent_context=recent_context,
-                            max_iterations=max_iterations,
-                        )
-                        self._log_route(
-                            "skill_execution_finished",
-                            skill_name=skill_spec.name,
-                            completed=skill_execution_result.completed,
-                            reason=skill_execution_result.reason,
-                        )
-
-                if (
-                    skill_spec is not None
-                    and skill_execution_result is not None
-                    and skill_execution_result.completed
-                    and skill_execution_result.response
-                ):
-                    self._log_route(
-                        "skill_finalizer_started",
-                        skill_name=skill_spec.name,
-                    )
-                    final_response, finalizer_reason = self._finalize_skill_response(
-                        intent_decision=intent_decision,
-                        recent_context=recent_context,
-                        skill_spec=skill_spec,
-                        skill_execution_result=skill_execution_result,
-                    )
-                    self._log_route(
-                        "skill_finalizer_finished",
-                        skill_name=skill_spec.name,
-                        reason=finalizer_reason,
-                    )
-                    self._log_route(
-                        "skill_response",
-                        skill_name=selection.skill_name,
-                        finalizer_reason=finalizer_reason,
-                    )
-                    response = final_response
-                else:
-                    self._log_route(
-                        "main_agent",
-                        confidence=intent_decision.no_execution_confidence,
-                        intent=intent_decision.intent,
-                        via="skill_fallback" if skill_execution_result is not None else "direct_handoff",
-                        skill_name=selection.skill_name,
-                        skill_arguments=selection.skill_arguments,
-                    )
-                    response = self._run_main_agent(
-                        user_message=prompt,
-                        intent_decision=intent_decision,
-                        recent_context=recent_context,
-                        date_grounding=date_grounding,
-                        skill_selection=selection,
-                        skill_execution_result=skill_execution_result,
-                        max_iterations=max_iterations,
-                        session=session,
-                        images=images,
-                        files=files,
-                    )
+                step_results = self._execute_plan(
+                    execution_plan=execution_plan,
+                    available_skills=available_skills,
+                    user_message=prompt,
+                    intent_decision=intent_decision,
+                    older_context=older_context,
+                    recent_context=recent_context,
+                    date_grounding=date_grounding,
+                    max_iterations=max_iterations,
+                    session=session,
+                    images=images,
+                    files=files,
+                )
+                self._log_route(
+                    "finalizer_started",
+                    step_count=len(step_results),
+                )
+                response, finalizer_reason = self._finalize_execution(
+                    intent_decision=intent_decision,
+                    older_context=older_context,
+                    recent_context=recent_context,
+                    step_results=step_results,
+                )
+                self._log_route(
+                    "finalizer_finished",
+                    reason=finalizer_reason,
+                )
 
             dialogue_store.append({"role": "user", "content": prompt})
             dialogue_store.append({"role": "assistant", "content": response})
@@ -1126,18 +1136,21 @@ class IntentLayerOrchestrator:
             ]
         )
 
-    def _select_skill(
-        self,
-        *,
-        intent_decision: IntentDecision,
-        current_message: str,
-        recent_context: list[DialogueItem],
-        available_skills: list[SkillSpec],
-    ) -> SkillSelection:
-        if not available_skills:
-            return SkillSelection(False, None, "No skills are registered in skills/registry.yaml.")
+    @staticmethod
+    def _serialize_plan_step(step: PlannedStep) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "step_id": step.step_id,
+            "type": step.step_type,
+            "goal": step.goal,
+            "reads": list(step.reads),
+        }
+        if step.name:
+            payload["name"] = step.name
+        return payload
 
-        skills_block = []
+    @staticmethod
+    def _build_skills_block(available_skills: list[SkillSpec]) -> str:
+        skill_blocks: list[str] = []
         for spec in available_skills:
             lines = [
                 f"- skill_name: {spec.name}",
@@ -1150,7 +1163,44 @@ class IntentLayerOrchestrator:
             lines.append(_format_skill_input_schema_for_prompt(spec))
             if spec.output:
                 lines.append(f"  output: {spec.output}")
-            skills_block.append("\n".join(lines))
+            skill_blocks.append("\n".join(lines))
+        return "\n\n".join(skill_blocks)
+
+    def _build_default_agent_plan(
+        self,
+        *,
+        intent_decision: IntentDecision,
+        reason: str,
+    ) -> ExecutionPlan:
+        return ExecutionPlan(
+            steps=(
+                PlannedStep(
+                    step_id="step_1",
+                    step_type="agent",
+                    name="main_agent",
+                    goal=intent_decision.intent,
+                    reads=(),
+                ),
+            ),
+            reason=reason,
+        )
+
+    def _plan_execution(
+        self,
+        *,
+        intent_decision: IntentDecision,
+        current_message: str,
+        older_context: list[DialogueItem],
+        recent_context: list[DialogueItem],
+        available_skills: list[SkillSpec],
+    ) -> ExecutionPlan:
+        if not available_skills:
+            return self._build_default_agent_plan(
+                intent_decision=intent_decision,
+                reason="No skills are registered in skills/registry.yaml.",
+            )
+        if self._planner_agent is None:
+            raise SkillLayerError("Planner agent is not configured.")
 
         prompt = "\n\n".join(
             [
@@ -1158,149 +1208,267 @@ class IntentLayerOrchestrator:
                 intent_decision.intent,
                 "[CURRENT_USER_MESSAGE]",
                 current_message.strip(),
+                "[OLDER_CONTEXT]",
+                format_context(older_context),
                 "[RECENT_CONTEXT]",
                 format_context(recent_context),
                 "[CURRENT_SESSION_STATE]",
                 "No explicit session state is available in this implementation.",
                 "[AVAILABLE_SKILLS]",
-                "\n\n".join(skills_block),
+                self._build_skills_block(available_skills),
             ]
         )
 
         try:
-            payload = _extract_json_payload(self._skill_selector_agent.input(prompt, max_iterations=1))
+            payload = _extract_json_payload(self._planner_agent.input(prompt, max_iterations=1))
         except Exception as exc:
-            raise SkillLayerError(f"Skill selector execution failed: {exc}") from exc
+            raise SkillLayerError(f"Planner execution failed: {exc}") from exc
 
-        should_use_skill = bool(payload.get("should_use_skill"))
-        skill_name_raw = payload.get("skill_name")
-        skill_name = None if skill_name_raw is None else str(skill_name_raw).strip()
-        skills_by_name = {spec.name: spec for spec in available_skills}
-        skill_arguments = payload.get("skill_arguments")
-        if not isinstance(skill_arguments, dict):
-            raise SkillLayerError("Skill selector must return skill_arguments as a JSON object.")
+        raw_steps = payload.get("steps")
+        if not isinstance(raw_steps, list) or not raw_steps:
+            raise SkillLayerError("Planner must return a non-empty steps array.")
         reason = _require_non_empty_string(payload.get("reason"), field_name="reason", error_type=SkillLayerError)
+        skills_by_name = {spec.name: spec for spec in available_skills}
+        seen_step_ids: set[str] = set()
+        steps: list[PlannedStep] = []
 
-        if should_use_skill:
-            if not skill_name:
-                raise SkillLayerError("Skill selector returned should_use_skill=true without a skill_name.")
-            if skill_name not in skills_by_name:
-                raise SkillLayerError(f"Skill selector returned unknown skill_name: {skill_name}")
-            validated_arguments = validate_skill_arguments(
-                skills_by_name[skill_name],
-                skill_arguments,
+        for raw_step in raw_steps:
+            if not isinstance(raw_step, dict):
+                raise SkillLayerError("Each planner step must be a JSON object.")
+
+            step_id = _require_non_empty_string(
+                raw_step.get("step_id"),
+                field_name="step_id",
                 error_type=SkillLayerError,
             )
-            return SkillSelection(True, skill_name, reason, validated_arguments)
+            if step_id in seen_step_ids:
+                raise SkillLayerError(f"Planner returned duplicate step_id: {step_id}")
 
-        if skill_name is not None:
-            raise SkillLayerError("Skill selector returned a skill_name even though should_use_skill=false.")
-        if skill_arguments:
-            raise SkillLayerError("Skill selector returned non-empty skill_arguments even though should_use_skill=false.")
+            step_type = _normalize_text(raw_step.get("type")).lower()
+            if step_type not in {"skill", "agent"}:
+                raise SkillLayerError(f"Planner returned unsupported step type '{step_type}' for {step_id}.")
 
-        return SkillSelection(False, None, reason, {})
+            goal = _require_non_empty_string(raw_step.get("goal"), field_name="goal", error_type=SkillLayerError)
 
-    def _finalize_skill_response(
+            raw_reads = raw_step.get("reads")
+            if raw_reads is None:
+                reads: tuple[str, ...] = ()
+            else:
+                if not isinstance(raw_reads, list):
+                    raise SkillLayerError(f"Planner step '{step_id}' must use a reads array.")
+                reads_list: list[str] = []
+                for raw_read in raw_reads:
+                    read_step_id = _require_non_empty_string(
+                        raw_read,
+                        field_name=f"{step_id}.reads[]",
+                        error_type=SkillLayerError,
+                    )
+                    if read_step_id not in seen_step_ids:
+                        raise SkillLayerError(
+                            f"Planner step '{step_id}' references unknown or future step '{read_step_id}'."
+                        )
+                    reads_list.append(read_step_id)
+                reads = tuple(reads_list)
+
+            name: str | None = None
+            if step_type == "skill":
+                name = _require_non_empty_string(
+                    raw_step.get("name"),
+                    field_name="name",
+                    error_type=SkillLayerError,
+                )
+                if name not in skills_by_name:
+                    raise SkillLayerError(f"Planner returned unknown skill name '{name}' for {step_id}.")
+            elif raw_step.get("name") is not None:
+                name = str(raw_step.get("name") or "").strip() or None
+
+            if raw_step.get("skill_arguments") is not None:
+                raise SkillLayerError(
+                    f"Planner step '{step_id}' must not include skill_arguments. Skill arguments belong to the skill input resolver."
+                )
+
+            steps.append(
+                PlannedStep(
+                    step_id=step_id,
+                    step_type=step_type,
+                    name=name,
+                    goal=goal,
+                    reads=reads,
+                )
+            )
+            seen_step_ids.add(step_id)
+
+        return ExecutionPlan(steps=tuple(steps), reason=reason)
+
+    def _resolve_skill_arguments(
         self,
         *,
-        intent_decision: IntentDecision,
-        recent_context: list[DialogueItem],
         skill_spec: SkillSpec,
-        skill_execution_result: SkillExecutionResult,
-    ) -> tuple[str, str]:
-        skill_result_payload = {
-            "completed": skill_execution_result.completed,
-            "skill_result": skill_execution_result.response,
-            "reason": skill_execution_result.reason,
-        }
+        intent_decision: IntentDecision,
+        step: PlannedStep,
+        read_results: tuple[StepExecutionResult, ...],
+    ) -> dict[str, Any]:
+        serialized_read_results = [serialize_step_result(result) for result in read_results]
         prompt = "\n\n".join(
             [
                 "[INTENT]",
                 intent_decision.intent,
-                "[RECENT_CONTEXT]",
-                format_context(recent_context),
-                "[SELECTED_SKILL]",
+                "[STEP_GOAL]",
+                step.goal,
+                "[CURRENT_SKILL]",
                 "\n".join(
                     [
                         f"skill_name: {skill_spec.name}",
                         f"skill_description: {skill_spec.description or '(empty)'}",
                         f"skill_scope: {skill_spec.scope or '(empty)'}",
-                        f"skill_output: {skill_spec.output or '(empty)'}",
+                        "skill_input_schema:",
+                        _format_skill_input_schema_for_prompt(skill_spec),
                     ]
                 ),
-                "[SKILL_RESULT]",
-                json.dumps(skill_result_payload, ensure_ascii=False, indent=2),
+                "[READ_RESULTS]",
+                json.dumps(serialized_read_results, ensure_ascii=False, indent=2),
             ]
         )
 
         try:
-            raw_response = self._skill_finalizer_agent.input(prompt, max_iterations=1)
+            raw_response = self._skill_input_resolver_agent.input(prompt, max_iterations=1)
             payload = _extract_json_payload(raw_response)
         except Exception as exc:
-            self._log_route(
-                "skill_finalizer_error",
-                skill_name=skill_spec.name,
-                reason=f"Skill finalizer execution failed: {exc}",
-            )
-            raise SkillLayerError(f"Skill finalizer execution failed: {exc}") from exc
+            raise SkillLayerError(f"Skill input resolver failed for '{skill_spec.name}': {exc}") from exc
 
-        try:
-            final_response = _require_non_empty_string(
-                payload.get("final_response"),
-                field_name="final_response",
-                error_type=SkillLayerError,
-            )
-            reason = _require_non_empty_string(
-                payload.get("reason"),
-                field_name="reason",
-                error_type=SkillLayerError,
-            )
-        except Exception as exc:
-            self._log_route(
-                "skill_finalizer_error",
-                skill_name=skill_spec.name,
-                reason=f"Skill finalizer returned invalid output: {exc}",
-            )
-            raise
+        skill_arguments = payload.get("skill_arguments")
+        if not isinstance(skill_arguments, dict):
+            raise SkillLayerError(f"Skill input resolver must return skill_arguments as a JSON object for '{skill_spec.name}'.")
 
-        return final_response, reason
+        validated_arguments = validate_skill_arguments(
+            skill_spec,
+            skill_arguments,
+            error_type=SkillLayerError,
+        )
+        self._log_route(
+            "skill_input_resolved",
+            step_id=step.step_id,
+            skill_name=skill_spec.name,
+            skill_arguments=validated_arguments,
+        )
+        return validated_arguments
 
-    def _run_main_agent(
+    def _execute_skill_step(
         self,
         *,
+        step: PlannedStep,
+        skill_spec: SkillSpec,
+        read_results: tuple[StepExecutionResult, ...],
         user_message: str,
         intent_decision: IntentDecision,
         recent_context: list[DialogueItem],
+        max_iterations: int | None,
+    ) -> StepExecutionResult:
+        if self._skill_executor is None:
+            raise SkillLayerError("Skill executor is not configured.")
+
+        skill_arguments = self._resolve_skill_arguments(
+            skill_spec=skill_spec,
+            intent_decision=intent_decision,
+            step=step,
+            read_results=read_results,
+        )
+        self._log_route(
+            "skill_execution_started",
+            step_id=step.step_id,
+            skill_name=skill_spec.name,
+            used_tools=", ".join(skill_spec.used_tools),
+            skill_arguments=skill_arguments,
+        )
+        execute_kwargs: dict[str, Any] = {
+            "skill_arguments": skill_arguments,
+            "current_message": user_message,
+            "intent_decision": intent_decision,
+            "recent_context": recent_context,
+            "max_iterations": max_iterations,
+        }
+        run_signature = inspect.signature(self._skill_executor.run)
+        if (
+            "step_goal" in run_signature.parameters
+            or any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in run_signature.parameters.values())
+        ):
+            execute_kwargs["step_goal"] = step.goal
+        if (
+            "read_results" in run_signature.parameters
+            or any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in run_signature.parameters.values())
+        ):
+            execute_kwargs["read_results"] = [serialize_step_result(result) for result in read_results]
+
+        skill_execution_result = self._skill_executor.run(
+            skill_spec,
+            **execute_kwargs,
+        )
+        self._log_route(
+            "skill_execution_finished",
+            step_id=step.step_id,
+            skill_name=skill_spec.name,
+            completed=skill_execution_result.completed,
+            reason=skill_execution_result.reason,
+        )
+        artifact_summary = str(skill_execution_result.response or "").strip()
+        if not artifact_summary:
+            artifact_summary = skill_execution_result.reason
+        status = "completed" if skill_execution_result.completed and skill_execution_result.response else "failed"
+        return StepExecutionResult(
+            step_id=step.step_id,
+            step_type="skill",
+            name=skill_spec.name,
+            status=status,
+            artifact={
+                "kind": "skill_result",
+                "summary": artifact_summary,
+                "data": {
+                    "response": skill_execution_result.response or "",
+                    "completed": skill_execution_result.completed,
+                    "skill_arguments": copy.deepcopy(skill_arguments),
+                },
+            },
+            reason=skill_execution_result.reason,
+        )
+
+    def _execute_agent_step(
+        self,
+        *,
+        step: PlannedStep,
+        read_results: tuple[StepExecutionResult, ...],
+        user_message: str,
+        intent_decision: IntentDecision,
+        older_context: list[DialogueItem],
+        recent_context: list[DialogueItem],
         date_grounding: str,
-        skill_selection: SkillSelection,
-        skill_execution_result: SkillExecutionResult | None,
         max_iterations: int | None,
         session: dict[str, Any] | None,
         images: list[str] | None,
         files: list[dict[str, Any]] | None,
-    ) -> str:
-        handoff_sections = [
-            "[INTENT_LAYER_HANDOFF]",
-            f"intent: {intent_decision.intent}",
-            f"reason: {intent_decision.reason or 'No reason provided.'}",
-            f"no_execution_confidence: {intent_decision.no_execution_confidence}",
-            f"skill_selector: {'use ' + skill_selection.skill_name if skill_selection.should_use_skill and skill_selection.skill_name else 'route to main agent'}",
-            f"skill_selector_reason: {skill_selection.reason}",
-            f"skill_selector_arguments: {json.dumps(skill_selection.skill_arguments, ensure_ascii=False, sort_keys=True)}",
-        ]
-        if skill_execution_result is not None:
-            handoff_sections.extend(
-                [
-                    f"skill_attempted: {skill_execution_result.attempted}",
-                    f"skill_completed: {skill_execution_result.completed}",
-                    f"skill_execution_reason: {skill_execution_result.reason}",
-                ]
-            )
-        handoff_sections.extend(
+    ) -> StepExecutionResult:
+        self._log_route(
+            "main_agent",
+            step_id=step.step_id,
+            confidence=intent_decision.no_execution_confidence,
+            intent=intent_decision.intent,
+            goal=step.goal,
+            reads=list(step.reads),
+        )
+        handoff_prompt = "\n".join(
             [
+                "[SERIAL_AGENT_STEP]",
+                f"intent: {intent_decision.intent}",
+                f"step_id: {step.step_id}",
+                f"step_goal: {step.goal}",
+                "",
+                "[READ_RESULTS]",
+                json.dumps([serialize_step_result(result) for result in read_results], ensure_ascii=False, indent=2),
                 "",
                 "[DATE_GROUNDING]",
                 date_grounding,
+                "",
+                "[OLDER_CONTEXT]",
+                format_context(older_context),
                 "",
                 "[RECENT_CONTEXT]",
                 format_context(recent_context),
@@ -1308,11 +1476,11 @@ class IntentLayerOrchestrator:
                 "[USER_MESSAGE]",
                 user_message.strip(),
             ]
-        )
-        handoff_prompt = "\n".join(handoff_sections).strip()
+        ).strip()
+
         if isinstance(self.current_session, dict):
             setattr(self._main_agent, "current_session", self.current_session)
-        response = self._main_agent.input(
+        raw_response = self._main_agent.input(
             handoff_prompt,
             max_iterations=max_iterations,
             session=session,
@@ -1322,4 +1490,135 @@ class IntentLayerOrchestrator:
         updated_session = getattr(self._main_agent, "current_session", None)
         if isinstance(updated_session, dict):
             self.current_session = updated_session
-        return response
+
+        response_text = str(raw_response or "").strip()
+        if not response_text:
+            raise SkillLayerError("Main agent step returned an empty response.")
+
+        return StepExecutionResult(
+            step_id=step.step_id,
+            step_type="agent",
+            name=step.name or "main_agent",
+            status="completed",
+            artifact={
+                "response": response_text,
+            },
+            reason="Main agent step completed.",
+        )
+
+    def _execute_plan(
+        self,
+        *,
+        execution_plan: ExecutionPlan,
+        available_skills: list[SkillSpec],
+        user_message: str,
+        intent_decision: IntentDecision,
+        older_context: list[DialogueItem],
+        recent_context: list[DialogueItem],
+        date_grounding: str,
+        max_iterations: int | None,
+        session: dict[str, Any] | None,
+        images: list[str] | None,
+        files: list[dict[str, Any]] | None,
+    ) -> tuple[StepExecutionResult, ...]:
+        skills_by_name = {skill.name: skill for skill in available_skills}
+        results_by_step_id: dict[str, StepExecutionResult] = {}
+        step_results: list[StepExecutionResult] = []
+
+        for step in execution_plan.steps:
+            read_results = tuple(results_by_step_id[step_id] for step_id in step.reads)
+            self._log_route(
+                "step_execution_started",
+                step_id=step.step_id,
+                type=step.step_type,
+                name=step.name,
+                goal=step.goal,
+                reads=list(step.reads),
+            )
+            try:
+                if step.step_type == "skill":
+                    if not step.name:
+                        raise SkillLayerError(f"Skill step '{step.step_id}' is missing a skill name.")
+                    skill_spec = skills_by_name.get(step.name)
+                    if skill_spec is None:
+                        raise SkillLayerError(f"Skill step '{step.step_id}' references unknown skill '{step.name}'.")
+                    step_result = self._execute_skill_step(
+                        step=step,
+                        skill_spec=skill_spec,
+                        read_results=read_results,
+                        user_message=user_message,
+                        intent_decision=intent_decision,
+                        recent_context=recent_context,
+                        max_iterations=max_iterations,
+                    )
+                else:
+                    step_result = self._execute_agent_step(
+                        step=step,
+                        read_results=read_results,
+                        user_message=user_message,
+                        intent_decision=intent_decision,
+                        older_context=older_context,
+                        recent_context=recent_context,
+                        date_grounding=date_grounding,
+                        max_iterations=max_iterations,
+                        session=session,
+                        images=images,
+                        files=files,
+                    )
+            except Exception as exc:
+                step_result = StepExecutionResult(
+                    step_id=step.step_id,
+                    step_type=step.step_type,
+                    name=step.name or ("main_agent" if step.step_type == "agent" else None),
+                    status="failed",
+                    artifact={"error": str(exc)},
+                    reason=str(exc),
+                )
+
+            results_by_step_id[step.step_id] = step_result
+            step_results.append(step_result)
+            self._log_route(
+                "step_execution_finished",
+                step_id=step_result.step_id,
+                type=step_result.step_type,
+                name=step_result.name,
+                status=step_result.status,
+                reason=step_result.reason,
+            )
+
+        return tuple(step_results)
+
+    def _finalize_execution(
+        self,
+        *,
+        intent_decision: IntentDecision,
+        older_context: list[DialogueItem],
+        recent_context: list[DialogueItem],
+        step_results: tuple[StepExecutionResult, ...],
+    ) -> tuple[str, str]:
+        prompt = "\n\n".join(
+            [
+                "[INTENT]",
+                intent_decision.intent,
+                "[OLDER_CONTEXT]",
+                format_context(older_context),
+                "[RECENT_CONTEXT]",
+                format_context(recent_context),
+                "[ALL_STEP_RESULTS]",
+                json.dumps([serialize_step_result(result) for result in step_results], ensure_ascii=False, indent=2),
+            ]
+        )
+
+        try:
+            raw_response = self._finalizer_agent.input(prompt, max_iterations=1)
+            payload = _extract_json_payload(raw_response)
+        except Exception as exc:
+            raise SkillLayerError(f"Finalizer execution failed: {exc}") from exc
+
+        final_response = _require_non_empty_string(
+            payload.get("final_response"),
+            field_name="final_response",
+            error_type=SkillLayerError,
+        )
+        reason = str(payload.get("reason") or "Finalizer completed.").strip() or "Finalizer completed."
+        return final_response, reason

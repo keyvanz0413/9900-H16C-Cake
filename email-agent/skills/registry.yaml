@@ -41,28 +41,35 @@ skills:
         description: Maximum number of recent email search results to inspect, capped at 250.
     output: A read-only unsubscribe candidate list grouped by sender or domain with execution-ready unsubscribe classifications such as one_click, mailto, website, or unknown.
   - name: unsubscribe_execute
-    description: Execute a user-confirmed unsubscribe action for one specific Gmail message by re-reading its unsubscribe options and using one_click or mailto when available.
-    scope: Performs one explicit unsubscribe action only when confirmed=true. Supports RFC 8058 one-click POST and mailto request sending. Does not open websites, does not run browser automation, and does not archive, delete, label, or otherwise modify existing mailbox messages.
+    description: Discover recent newsletter, marketing, or subscription emails, inspect their execution-ready unsubscribe options, and execute user-confirmed unsubscribe actions across the discovered candidate list.
+    scope: Reuses the same discovery pipeline as unsubscribe_discovery, then performs batch execution only when confirmed=true. Supports RFC 8058 one-click POST and mailto request sending. Does not open websites, does not run browser automation, and does not archive, delete, label, or otherwise modify existing mailbox messages.
     used_tools:
+      - search_emails
       - get_unsubscribe_info
       - post_one_click_unsubscribe
       - send
     input_schema:
-      email_id:
-        type: string
-        required: true
-        description: Gmail message id for the representative email to unsubscribe from.
+      days:
+        type: int
+        required: false
+        default: 30
+        description: Number of recent days to inspect for unsubscribe candidates.
+      max_results:
+        type: int
+        required: false
+        default: 100
+        description: Maximum number of matching emails to inspect before grouping them into unsubscribe candidates.
       method:
         type: string
         required: false
         default: auto
-        description: Execution method. Use auto unless the user explicitly selects one_click, mailto, or website.
+        description: Execution method override for all discovered candidates. Use auto unless the user explicitly selects one_click, mailto, or website.
       confirmed:
         type: bool
         required: false
         default: false
-        description: Must be true only when the user explicitly confirms executing the unsubscribe action.
-    output: An unsubscribe execution result with status confirmed, request_accepted, request_sent, manual_link_available, manual_required, failed, or uncertain, grounded in re-read unsubscribe metadata, execution tool result, and any available manual unsubscribe link.
+        description: Must be true only when the user explicitly confirms executing the unsubscribe actions.
+    output: A batch unsubscribe execution result grounded in the same discovery search plus get_unsubscribe_info metadata, with per-candidate statuses such as needs_confirmation, confirmed, request_accepted, request_sent, manual_link_available, manual_required, failed, or uncertain.
   - name: weekly_email_summary
     description: Summarize recent email activity for a recent time window using mailbox identity, inbox, unanswered, and calendar context.
     scope: Read-only weekly summary workflow. Never send email and never modify mailbox state.
