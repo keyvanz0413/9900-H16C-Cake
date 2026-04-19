@@ -111,3 +111,30 @@ skills:
         default: 30
         description: Search lookback window used only when selection_mode is search_query, capped at 30.
     output: A user-facing reply draft grounded only in the located target email, the associated mailbox search results, and the fetched full email body.
+  - name: send_prepared_email
+    description: Send an already-finalized email when the recipient, subject, and full body are already explicit in the current message or recent conversation context.
+    scope: Send-only prepared-email workflow. Use only when the email content is already finalized. Never revise, expand, draft, or infer missing email content inside this skill.
+    used_tools:
+      - send
+    input_schema:
+      to:
+        type: string
+        required: true
+        description: Final recipient email address for the email that should be sent now.
+      subject:
+        type: string
+        required: true
+        description: Final subject line for the email that should be sent now.
+      body:
+        type: string
+        required: true
+        description: Final plain-text email body that should be sent now.
+      cc:
+        type: string
+        required: false
+        description: Optional comma-separated CC recipients if they are already explicitly provided in context.
+      bcc:
+        type: string
+        required: false
+        description: Optional comma-separated BCC recipients if they are already explicitly provided in context.
+    output: A user-facing confirmation grounded only in the direct send result and the finalized email fields that were sent.

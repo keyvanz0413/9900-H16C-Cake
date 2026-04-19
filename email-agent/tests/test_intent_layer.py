@@ -283,6 +283,35 @@ class ResumeCandidateToolBox:
         )
 
 
+class SendPreparedEmailToolBox:
+    def __init__(self):
+        self.calls: list[tuple[str, dict[str, object]]] = []
+        self._lock = threading.Lock()
+
+    def send(
+        self,
+        to: str,
+        subject: str,
+        body: str,
+        cc: str | None = None,
+        bcc: str | None = None,
+    ) -> str:
+        with self._lock:
+            self.calls.append(
+                (
+                    "send",
+                    {
+                        "to": to,
+                        "subject": subject,
+                        "body": body,
+                        **({"cc": cc} if cc is not None else {}),
+                        **({"bcc": bcc} if bcc is not None else {}),
+                    },
+                )
+            )
+        return "Email sent successfully to zenglin0813@gmail.com. Message ID: sent-001"
+
+
 class DraftReplyToolBox:
     def __init__(self):
         self.calls: list[tuple[str, dict[str, object]]] = []
@@ -1653,6 +1682,90 @@ def test_resume_candidate_review_skill_uses_fixed_workflow(repo_root: Path | Non
                 "max_results": 350,
             },
         ),
+    ]
+
+
+def test_send_prepared_email_skill_uses_native_send_tool(repo_root: Path | None = None):
+    del repo_root
+    toolbox = SendPreparedEmailToolBox()
+    tool_function_map = build_tool_function_map([toolbox])
+    skills_directory = Path(__file__).resolve().parent.parent / "skills"
+
+    executor = PythonSkillExecutor(
+        skills_directory=skills_directory,
+        tool_function_map=tool_function_map,
+    )
+
+    result = executor.run(
+        SkillSpec(
+            name="send_prepared_email",
+            description="Send an already-finalized email when the recipient, subject, and full body are already explicit in the current message or recent conversation context.",
+            scope="Send-only prepared-email workflow. Use only when the email content is already finalized. Never revise, expand, draft, or infer missing email content inside this skill.",
+            used_tools=("send",),
+            output="A user-facing confirmation grounded only in the direct send result and the finalized email fields that were sent.",
+            input_schema=(
+                SkillInputFieldSpec(
+                    name="to",
+                    field_type="string",
+                    required=True,
+                    description="Final recipient email address for the email that should be sent now.",
+                ),
+                SkillInputFieldSpec(
+                    name="subject",
+                    field_type="string",
+                    required=True,
+                    description="Final subject line for the email that should be sent now.",
+                ),
+                SkillInputFieldSpec(
+                    name="body",
+                    field_type="string",
+                    required=True,
+                    description="Final plain-text email body that should be sent now.",
+                ),
+                SkillInputFieldSpec(
+                    name="cc",
+                    field_type="string",
+                    required=False,
+                    description="Optional comma-separated CC recipients if they are already explicitly provided in context.",
+                ),
+                SkillInputFieldSpec(
+                    name="bcc",
+                    field_type="string",
+                    required=False,
+                    description="Optional comma-separated BCC recipients if they are already explicitly provided in context.",
+                ),
+            ),
+        ),
+        skill_arguments={
+            "to": "zenglin0813@gmail.com",
+            "subject": "明天下午一起喝咖啡？",
+            "body": "Zenglin，你好，\n\n想问问你明天下午三点有没有空，一起出来喝杯咖啡？\n\n祝好，\n丁文彧",
+        },
+        current_message="帮我发",
+        intent_decision=type(
+            "IntentDecisionLike",
+            (),
+            {"intent": "用户想把前面已经定稿的邮件直接发出去。"},
+        )(),
+        recent_context=[],
+    )
+
+    assert result.completed is True
+    assert "[SEND_PREPARED_EMAIL_RESULT]" in result.response
+    assert "[SEND_EMAIL_RESULT]" in result.response
+    assert "Email sent successfully to zenglin0813@gmail.com. Message ID: sent-001" in result.response
+    assert "Finalizer instruction: clearly state that the email was sent only if the send result below indicates success." in result.response
+    assert "to: zenglin0813@gmail.com" in result.response
+    assert "subject: 明天下午一起喝咖啡？" in result.response
+    assert toolbox.calls == [
+        (
+            "send",
+            {
+                "to": "zenglin0813@gmail.com",
+                "subject": "明天下午一起喝咖啡？",
+                "body": "Zenglin，你好，\n\n想问问你明天下午三点有没有空，一起出来喝杯咖啡？\n\n祝好，\n丁文彧",
+            },
+        )
     ]
 
 
