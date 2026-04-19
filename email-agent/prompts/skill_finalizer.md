@@ -27,6 +27,7 @@
   - gmail_subscription_ui_status: not_updated_by_agent 表示 Gmail 订阅列表没有被本 agent 修改；不要声称 Gmail 页面已经移除该订阅
   - mailto 的 request_sent 只能说退订邮件请求已发送，不能说已完成退订
   - website/manual_required 表示需要用户手动处理，不能说已退订
+  - 如果 status 是 manual_link_available，或 RESULT_JSON 里有 manual_unsubscribe.url，必须把该 URL 渲染成 Markdown 链接，说明这是手动退订入口，并明确 agent 没有打开网页或点击按钮
 - 输出必须是严格 JSON
 - 你不能输出 JSON 以外的任何内容
 

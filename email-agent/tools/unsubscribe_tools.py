@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import html
 import json
 import re
 from typing import Any
@@ -19,6 +21,15 @@ _DEFAULT_HEADER_NAMES = (
 _BRACKETED_VALUE_PATTERN = re.compile(r"<([^>]+)>")
 _URL_PATTERN = re.compile(r"https?://[^\s<>\")']+", flags=re.IGNORECASE)
 _MAILTO_PATTERN = re.compile(r"mailto:[^\s<>\")']+", flags=re.IGNORECASE)
+_ANCHOR_PATTERN = re.compile(
+    r"<a\b[^>]*href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+_TAG_PATTERN = re.compile(r"<[^>]+>")
+_UNSUBSCRIBE_TEXT_PATTERN = re.compile(
+    r"unsubscribe|un-subscribe|opt\s*out|email\s*preferences|manage\s*preferences|subscription\s*preferences",
+    flags=re.IGNORECASE,
+)
 
 
 def _json_dumps(payload: dict[str, Any]) -> str:
@@ -200,6 +211,148 @@ def _host_for_url(url: str) -> str:
         return urlparse(url).netloc.lower()
     except Exception:
         return ""
+
+
+def _decode_base64url(raw_data: Any) -> str:
+    data = str(raw_data or "").strip()
+    if not data:
+        return ""
+    padding = "=" * (-len(data) % 4)
+    try:
+        return base64.urlsafe_b64decode(data + padding).decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def _strip_tags(value: str) -> str:
+    text = _TAG_PATTERN.sub(" ", str(value or ""))
+    text = html.unescape(text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def _append_link(links: list[dict[str, str]], *, url: str, anchor_text: str, source: str) -> None:
+    normalized_url = html.unescape(str(url or "").strip())
+    if not normalized_url.lower().startswith(("http://", "https://")):
+        return
+    normalized_anchor = _strip_tags(anchor_text) or "(link)"
+    if not _UNSUBSCRIBE_TEXT_PATTERN.search(normalized_anchor) and not _UNSUBSCRIBE_TEXT_PATTERN.search(normalized_url):
+        return
+    if any(item.get("url") == normalized_url for item in links):
+        return
+    links.append(
+        {
+            "url": normalized_url,
+            "anchor_text": normalized_anchor,
+            "source": source,
+            "kind": "unsubscribe_link",
+        }
+    )
+
+
+def _extract_unsubscribe_links_from_content(*, content: str, source: str) -> list[dict[str, str]]:
+    links: list[dict[str, str]] = []
+    text = str(content or "")
+    if not text:
+        return links
+
+    for href, anchor_html in _ANCHOR_PATTERN.findall(text):
+        _append_link(links, url=href, anchor_text=anchor_html, source=source)
+
+    for url in _URL_PATTERN.findall(text):
+        window_start = max(text.find(url) - 80, 0)
+        window_end = min(text.find(url) + len(url) + 80, len(text))
+        surrounding_text = text[window_start:window_end]
+        _append_link(links, url=url.rstrip(">,."), anchor_text=surrounding_text, source=source)
+
+    return links
+
+
+def _collect_message_text_parts(part: dict[str, Any], *, collected: list[dict[str, str]]) -> None:
+    mime_type = str(part.get("mimeType") or "").lower()
+    body = part.get("body", {}) or {}
+    data = body.get("data") if isinstance(body, dict) else ""
+
+    if data and mime_type in {"text/html", "text/plain"}:
+        collected.append(
+            {
+                "mime_type": mime_type,
+                "content": _decode_base64url(data),
+            }
+        )
+
+    for child in part.get("parts", []) or []:
+        if isinstance(child, dict):
+            _collect_message_text_parts(child, collected=collected)
+
+
+def extract_unsubscribe_links_from_email_tool(
+    *,
+    email_tool: Any,
+    email_id: str,
+    max_links: int = 5,
+) -> str:
+    """Extract likely manual unsubscribe links from the original Gmail message body."""
+    normalized_email_id = str(email_id or "").strip()
+    if not normalized_email_id:
+        return _json_dumps(
+            {
+                "ok": False,
+                "email_id": "",
+                "links": [],
+                "error": "extract_unsubscribe_links_from_email requires a non-empty email_id.",
+            }
+        )
+
+    try:
+        safe_max_links = min(max(int(max_links or 5), 1), 20)
+    except (TypeError, ValueError):
+        safe_max_links = 5
+
+    try:
+        service = email_tool._get_service()
+        message = (
+            service.users()
+            .messages()
+            .get(userId="me", id=normalized_email_id, format="full")
+            .execute()
+        )
+    except Exception as exc:
+        return _json_dumps(
+            {
+                "ok": False,
+                "email_id": normalized_email_id,
+                "links": [],
+                "error": str(exc),
+            }
+        )
+
+    payload = message.get("payload", {}) if isinstance(message, dict) else {}
+    text_parts: list[dict[str, str]] = []
+    if isinstance(payload, dict):
+        _collect_message_text_parts(payload, collected=text_parts)
+
+    links: list[dict[str, str]] = []
+    for part in text_parts:
+        part_links = _extract_unsubscribe_links_from_content(
+            content=part.get("content", ""),
+            source=part.get("mime_type", "message_body"),
+        )
+        for link in part_links:
+            if len(links) >= safe_max_links:
+                break
+            if not any(item.get("url") == link.get("url") for item in links):
+                links.append(link)
+
+    return _json_dumps(
+        {
+            "ok": True,
+            "email_id": normalized_email_id,
+            "links": links,
+            "link_count": len(links),
+            "error": "",
+        }
+    )
 
 
 def classify_unsubscribe_method(

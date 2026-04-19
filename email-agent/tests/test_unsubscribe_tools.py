@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import base64
 
 from tools.unsubscribe_tools import (
     classify_unsubscribe_method,
+    extract_unsubscribe_links_from_email_tool,
     get_email_headers_from_email_tool,
     parse_mailto_url,
     parse_list_unsubscribe_header,
@@ -217,3 +219,52 @@ def test_post_one_click_unsubscribe_treats_202_as_request_accepted(monkeypatch):
     assert payload["status"] == "request_accepted"
     assert payload["sender_unsubscribe_status"] == "request_accepted"
     assert payload["gmail_subscription_ui_status"] == "not_updated_by_agent"
+
+
+def _encode_text(value: str) -> str:
+    return base64.urlsafe_b64encode(value.encode("utf-8")).decode("utf-8").rstrip("=")
+
+
+def test_extract_unsubscribe_links_from_email_preserves_html_href():
+    calls = []
+    message_payloads = {
+        "msg-html": {
+            "id": "msg-html",
+            "payload": {
+                "mimeType": "multipart/alternative",
+                "parts": [
+                    {
+                        "mimeType": "text/html",
+                        "body": {
+                            "data": _encode_text(
+                                '<html><body><a href="https://example.com/unsub?token=abc">Click here to unsubscribe</a></body></html>'
+                            )
+                        },
+                    }
+                ],
+            },
+        }
+    }
+    service = _FakeService(message_payloads, calls)
+    email_tool = _FakeEmailTool(service)
+
+    payload = json.loads(
+        extract_unsubscribe_links_from_email_tool(
+            email_tool=email_tool,
+            email_id="msg-html",
+        )
+    )
+
+    assert payload["ok"] is True
+    assert payload["links"][0]["url"] == "https://example.com/unsub?token=abc"
+    assert payload["links"][0]["anchor_text"] == "Click here to unsubscribe"
+    assert calls == [
+        (
+            "message_get",
+            {
+                "userId": "me",
+                "id": "msg-html",
+                "format": "full",
+            },
+        )
+    ]

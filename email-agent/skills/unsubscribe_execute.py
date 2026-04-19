@@ -14,6 +14,7 @@ HEADER_NAMES = [
     "Precedence",
 ]
 ALLOWED_METHODS = {"auto", "one_click", "mailto", "website"}
+MANUAL_LINK_FALLBACK_STATUSES = {"failed", "uncertain", "manual_required"}
 
 
 def _call_tool(name: str, tool_callable: Callable[..., Any], kwargs: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
@@ -67,6 +68,24 @@ def _confirmation_result(*, email_id: str, classified_method: str, headers: dict
         ).strip(),
         "reason": "Execution requires explicit user confirmation; no unsubscribe action was performed.",
     }
+
+
+def _first_manual_link(link_payload: dict[str, Any]) -> dict[str, Any]:
+    links = link_payload.get("links")
+    if not isinstance(links, list):
+        return {}
+    for link in links:
+        if not isinstance(link, dict):
+            continue
+        url = str(link.get("url") or "").strip()
+        if url.lower().startswith(("http://", "https://")):
+            return {
+                "url": url,
+                "label": str(link.get("anchor_text") or "Open unsubscribe page").strip() or "Open unsubscribe page",
+                "source": str(link.get("source") or "email_body").strip() or "email_body",
+                "kind": str(link.get("kind") or "unsubscribe_link").strip() or "unsubscribe_link",
+            }
+    return {}
 
 
 def execute_skill(*, arguments, used_tools, skill_spec):
@@ -165,6 +184,10 @@ def execute_skill(*, arguments, used_tools, skill_spec):
     execution_payload: dict[str, Any] = {}
     execution_tool = "(none)"
     execution_kwargs: dict[str, Any] = {}
+    manual_unsubscribe: dict[str, Any] = {}
+    manual_link_tool = "(not run)"
+    manual_link_kwargs: dict[str, Any] = {}
+    manual_link_payload: dict[str, Any] = {}
 
     if effective_method == "one_click":
         one_click_url = str(classification.get("one_click_url") or "").strip()
@@ -239,11 +262,44 @@ def execute_skill(*, arguments, used_tools, skill_spec):
         execution_payload = {
             "website_url": classification.get("website_url"),
         }
+        website_url = str(classification.get("website_url") or "").strip()
+        if website_url:
+            manual_unsubscribe = {
+                "url": website_url,
+                "label": "Open unsubscribe page",
+                "source": "list_unsubscribe_header",
+                "kind": "unsubscribe_link",
+            }
+            execution_status = "manual_link_available"
 
     else:
         execution_status = "failed"
         sender_unsubscribe_status = "failed"
         execution_evidence = f"Unsupported or unknown unsubscribe method: {effective_method}."
+
+    should_extract_manual_link = (
+        confirmed
+        and not manual_unsubscribe
+        and execution_status in MANUAL_LINK_FALLBACK_STATUSES
+        and "extract_unsubscribe_links_from_email" in used_tools
+    )
+    if should_extract_manual_link:
+        manual_link_tool, manual_link_kwargs, manual_link_text = _call_tool(
+            "extract_unsubscribe_links_from_email",
+            used_tools["extract_unsubscribe_links_from_email"],
+            {"email_id": email_id, "max_links": 5},
+        )
+        manual_link_payload = _loads_mapping(manual_link_text)
+        manual_unsubscribe = _first_manual_link(manual_link_payload)
+        if manual_unsubscribe:
+            execution_status = "manual_link_available"
+            if sender_unsubscribe_status in {"failed", "manual_required", "uncertain"}:
+                sender_unsubscribe_status = "manual_required"
+            execution_evidence = (
+                f"{execution_evidence} Manual unsubscribe link extracted from the email body."
+                if execution_evidence
+                else "Manual unsubscribe link extracted from the email body."
+            )
 
     response_payload = {
         "email_id": email_id,
@@ -256,14 +312,18 @@ def execute_skill(*, arguments, used_tools, skill_spec):
         "sender_unsubscribe_status": sender_unsubscribe_status,
         "gmail_subscription_ui_status": gmail_subscription_ui_status,
         "evidence": execution_evidence,
+        "manual_unsubscribe": manual_unsubscribe,
         "classification": classification,
         "execution": execution_payload,
+        "manual_link_extraction": manual_link_payload,
         "tool_calls": {
             "get_email_headers": header_kwargs,
             "parse_list_unsubscribe_header": parse_kwargs,
             "classify_unsubscribe_method": classify_kwargs,
             "execution_tool": execution_tool,
             "execution_arguments": execution_kwargs,
+            "manual_link_tool": manual_link_tool,
+            "manual_link_arguments": manual_link_kwargs,
         },
     }
 
@@ -288,6 +348,7 @@ def execute_skill(*, arguments, used_tools, skill_spec):
                 "- mailto execution means request_sent, not confirmed.",
                 "- one_click execution reports the HTTP result returned by the sender unsubscribe endpoint.",
                 "- Gmail Subscriptions UI is not updated by this agent; it may still show the sender even after a one-click request is accepted.",
+                "- If status is manual_link_available, the user must open the extracted link manually; the agent did not visit the page.",
                 "",
                 "[RESULT_JSON]",
                 json.dumps(response_payload, ensure_ascii=False, indent=2, sort_keys=True),

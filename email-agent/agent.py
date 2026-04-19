@@ -13,6 +13,7 @@ from connectonion.useful_plugins import re_act, gmail_plugin, calendar_plugin
 from tools.attachment_text_tool import extract_recent_attachment_texts_from_email_tool
 from tools.unsubscribe_tools import (
     classify_unsubscribe_method,
+    extract_unsubscribe_links_from_email_tool,
     get_email_headers_from_email_tool,
     parse_mailto_url,
     parse_list_unsubscribe_header,
@@ -103,6 +104,26 @@ def get_email_headers(email_id: str, header_names: str = "") -> str:
     )
 
 
+def extract_unsubscribe_links_from_email(email_id: str, max_links: int = 5) -> str:
+    """Extract likely manual unsubscribe links from the original Gmail message body.
+
+    Args:
+        email_id: Gmail message id whose original body should be inspected.
+        max_links: Maximum number of unsubscribe links to return.
+
+    Returns:
+        JSON containing extracted manual unsubscribe links.
+    """
+    email_tool = _get_primary_email_tool()
+    if email_tool is None:
+        return '{"ok": false, "email_id": "", "links": [], "error": "Unsubscribe link extraction is only available when Gmail is connected."}'
+    return extract_unsubscribe_links_from_email_tool(
+        email_tool=email_tool,
+        email_id=email_id,
+        max_links=max_links,
+    )
+
+
 # Build tools list based on .env flags or existing provider tokens.
 # Note: Only one email provider at a time (tools have overlapping method names)
 tools = []
@@ -185,6 +206,7 @@ if has_gmail:
             classify_unsubscribe_method,
             parse_mailto_url,
             post_one_click_unsubscribe,
+            extract_unsubscribe_links_from_email,
         ]
     )
 

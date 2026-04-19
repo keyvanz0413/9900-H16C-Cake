@@ -57,6 +57,7 @@ skills:
       - post_one_click_unsubscribe
       - parse_mailto_url
       - send
+      - extract_unsubscribe_links_from_email
     input_schema:
       email_id:
         type: string
@@ -72,7 +73,7 @@ skills:
         required: false
         default: false
         description: Must be true only when the user explicitly confirms executing the unsubscribe action.
-    output: An unsubscribe execution result with status confirmed, request_sent, manual_required, failed, or uncertain, grounded in re-read message headers and the execution tool result.
+    output: An unsubscribe execution result with status confirmed, request_accepted, request_sent, manual_link_available, manual_required, failed, or uncertain, grounded in re-read message headers, execution tool result, and any extracted manual unsubscribe link.
   - name: weekly_email_summary
     description: Summarize recent email activity for a recent time window using mailbox identity, inbox, unanswered, and calendar context.
     scope: Read-only weekly summary workflow. Never send email and never modify mailbox state.

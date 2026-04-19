@@ -12,6 +12,7 @@ class UnsubscribeExecuteToolBox:
     def __init__(self, message_kind: str):
         self.message_kind = message_kind
         self.one_click_status = "confirmed"
+        self.one_click_evidence = ""
         self.calls: list[tuple[str, dict[str, object]]] = []
         self._lock = threading.Lock()
 
@@ -53,6 +54,8 @@ class UnsubscribeExecuteToolBox:
     def post_one_click_unsubscribe(self, url: str) -> str:
         self._record("post_one_click_unsubscribe", url=url)
         http_status = 202 if self.one_click_status == "request_accepted" else 204
+        if self.one_click_status == "failed":
+            http_status = 403
         return json.dumps(
             {
                 "status": self.one_click_status,
@@ -60,7 +63,27 @@ class UnsubscribeExecuteToolBox:
                 "gmail_subscription_ui_status": "not_updated_by_agent",
                 "http_status": http_status,
                 "url": url,
-                "evidence": f"HTTP {http_status} response received.",
+                "evidence": self.one_click_evidence or f"HTTP {http_status} response received.",
+                "error": "",
+            },
+            ensure_ascii=False,
+        )
+
+    def extract_unsubscribe_links_from_email(self, email_id: str, max_links: int = 5) -> str:
+        self._record("extract_unsubscribe_links_from_email", email_id=email_id, max_links=max_links)
+        return json.dumps(
+            {
+                "ok": True,
+                "email_id": email_id,
+                "links": [
+                    {
+                        "url": "https://example.com/manual-unsubscribe?token=abc",
+                        "anchor_text": "Click here to unsubscribe",
+                        "source": "text/html",
+                        "kind": "unsubscribe_link",
+                    }
+                ],
+                "link_count": 1,
                 "error": "",
             },
             ensure_ascii=False,
@@ -92,6 +115,7 @@ def _spec() -> SkillSpec:
             "post_one_click_unsubscribe",
             "parse_mailto_url",
             "send",
+            "extract_unsubscribe_links_from_email",
         ),
         output="execution result",
         input_schema=(
@@ -172,6 +196,28 @@ def test_unsubscribe_execute_preserves_one_click_request_accepted_status():
     assert "gmail_subscription_ui_status: not_updated_by_agent" in result.response
 
 
+def test_unsubscribe_execute_returns_manual_link_when_one_click_fails():
+    toolbox = UnsubscribeExecuteToolBox("one_click")
+    toolbox.one_click_status = "failed"
+    toolbox.one_click_evidence = "HTTP 403 response received."
+    result = _executor_for(toolbox).run(
+        _spec(),
+        skill_arguments={"email_id": "msg-001", "confirmed": True},
+        current_message="Yes, unsubscribe.",
+        intent_decision=type("Intent", (), {"intent": "Confirm unsubscribe."})(),
+        recent_context=[],
+    )
+
+    assert result.completed is True
+    assert result.response is not None
+    assert "status: manual_link_available" in result.response
+    assert "https://example.com/manual-unsubscribe?token=abc" in result.response
+    assert (
+        "extract_unsubscribe_links_from_email",
+        {"email_id": "msg-001", "max_links": 5},
+    ) in toolbox.calls
+
+
 def test_unsubscribe_execute_mailto_sends_request_but_not_confirmed():
     toolbox = UnsubscribeExecuteToolBox("mailto")
     result = _executor_for(toolbox).run(
@@ -188,7 +234,7 @@ def test_unsubscribe_execute_mailto_sends_request_but_not_confirmed():
     assert ("send", {"to": "unsubscribe@example.com", "subject": "unsubscribe", "body": "unsubscribe"}) in toolbox.calls
 
 
-def test_unsubscribe_execute_website_returns_manual_required_without_opening_url():
+def test_unsubscribe_execute_website_returns_manual_link_without_opening_url():
     toolbox = UnsubscribeExecuteToolBox("website")
     result = _executor_for(toolbox).run(
         _spec(),
@@ -200,6 +246,7 @@ def test_unsubscribe_execute_website_returns_manual_required_without_opening_url
 
     assert result.completed is True
     assert result.response is not None
-    assert "status: manual_required" in result.response
+    assert "status: manual_link_available" in result.response
+    assert "https://service.example.com/preferences" in result.response
     assert "post_one_click_unsubscribe" not in [name for name, _ in toolbox.calls]
     assert "send" not in [name for name, _ in toolbox.calls]
