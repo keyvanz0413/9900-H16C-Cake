@@ -19,7 +19,6 @@ _DEFAULT_HEADER_NAMES = (
 _BRACKETED_VALUE_PATTERN = re.compile(r"<([^>]+)>")
 _URL_PATTERN = re.compile(r"https?://[^\s<>\")']+", flags=re.IGNORECASE)
 _MAILTO_PATTERN = re.compile(r"mailto:[^\s<>\")']+", flags=re.IGNORECASE)
-_ONE_CLICK_BODY = "List-Unsubscribe=One-Click"
 
 
 def _json_dumps(payload: dict[str, Any]) -> str:
@@ -344,7 +343,15 @@ def post_one_click_unsubscribe(url: str, timeout_seconds: int = 10) -> str:
             }
         )
 
-    status = "confirmed" if 200 <= status_code < 300 else "uncertain"
+    if status_code in {200, 204}:
+        status = "confirmed"
+    elif status_code == 202:
+        status = "request_accepted"
+    elif 200 <= status_code < 300:
+        status = "request_submitted"
+    else:
+        status = "uncertain"
+
     evidence = f"HTTP {status_code} response received."
     if response_text:
         evidence = f"{evidence} Response preview: {response_text[:160]}"
@@ -354,6 +361,8 @@ def post_one_click_unsubscribe(url: str, timeout_seconds: int = 10) -> str:
             "http_status": status_code,
             "url": raw_url,
             "evidence": evidence,
+            "sender_unsubscribe_status": status,
+            "gmail_subscription_ui_status": "not_updated_by_agent",
             "error": "",
         }
     )

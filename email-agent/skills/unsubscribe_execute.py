@@ -159,6 +159,8 @@ def execute_skill(*, arguments, used_tools, skill_spec):
         )
 
     execution_status = "failed"
+    sender_unsubscribe_status = "failed"
+    gmail_subscription_ui_status = "not_updated_by_agent"
     execution_evidence = ""
     execution_payload: dict[str, Any] = {}
     execution_tool = "(none)"
@@ -177,6 +179,14 @@ def execute_skill(*, arguments, used_tools, skill_spec):
             )
             execution_payload = _loads_mapping(execution_text)
             execution_status = str(execution_payload.get("status") or "uncertain")
+            sender_unsubscribe_status = str(
+                execution_payload.get("sender_unsubscribe_status")
+                or execution_payload.get("status")
+                or "uncertain"
+            )
+            gmail_subscription_ui_status = str(
+                execution_payload.get("gmail_subscription_ui_status") or "not_updated_by_agent"
+            )
             execution_evidence = str(execution_payload.get("evidence") or "").strip()
 
     elif effective_method == "mailto":
@@ -193,6 +203,7 @@ def execute_skill(*, arguments, used_tools, skill_spec):
             mailto_payload = _loads_mapping(parse_mailto_text)
             if not mailto_payload.get("ok"):
                 execution_status = "failed"
+                sender_unsubscribe_status = "failed"
                 execution_evidence = str(mailto_payload.get("error") or "Could not parse mailto URL.")
                 execution_payload = {"parse_mailto": mailto_payload}
                 execution_tool = "parse_mailto_url"
@@ -211,6 +222,7 @@ def execute_skill(*, arguments, used_tools, skill_spec):
                     },
                 )
                 execution_status = "request_sent"
+                sender_unsubscribe_status = "request_sent"
                 execution_evidence = str(send_text or "Unsubscribe request email sent.").strip()
                 execution_payload = {
                     "parse_mailto": mailto_payload,
@@ -219,6 +231,7 @@ def execute_skill(*, arguments, used_tools, skill_spec):
 
     elif effective_method == "website":
         execution_status = "manual_required"
+        sender_unsubscribe_status = "manual_required"
         execution_evidence = (
             "This message only exposes a website unsubscribe URL. "
             "Website unsubscribe automation is not implemented in this version."
@@ -229,6 +242,7 @@ def execute_skill(*, arguments, used_tools, skill_spec):
 
     else:
         execution_status = "failed"
+        sender_unsubscribe_status = "failed"
         execution_evidence = f"Unsupported or unknown unsubscribe method: {effective_method}."
 
     response_payload = {
@@ -239,6 +253,8 @@ def execute_skill(*, arguments, used_tools, skill_spec):
         "classified_method": classified_method,
         "effective_method": effective_method,
         "status": execution_status,
+        "sender_unsubscribe_status": sender_unsubscribe_status,
+        "gmail_subscription_ui_status": gmail_subscription_ui_status,
         "evidence": execution_evidence,
         "classification": classification,
         "execution": execution_payload,
@@ -264,11 +280,14 @@ def execute_skill(*, arguments, used_tools, skill_spec):
                 f"skill_name: {skill_spec.get('name', 'unsubscribe_execute')}",
                 f"email_id: {email_id}",
                 f"status: {execution_status}",
+                f"sender_unsubscribe_status: {sender_unsubscribe_status}",
+                f"gmail_subscription_ui_status: {gmail_subscription_ui_status}",
                 f"effective_method: {effective_method}",
                 "notes:",
                 "- Website unsubscribe automation is not implemented.",
                 "- mailto execution means request_sent, not confirmed.",
-                "- one_click execution reports the HTTP result returned by the unsubscribe endpoint.",
+                "- one_click execution reports the HTTP result returned by the sender unsubscribe endpoint.",
+                "- Gmail Subscriptions UI is not updated by this agent; it may still show the sender even after a one-click request is accepted.",
                 "",
                 "[RESULT_JSON]",
                 json.dumps(response_payload, ensure_ascii=False, indent=2, sort_keys=True),

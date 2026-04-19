@@ -11,6 +11,7 @@ from tools.unsubscribe_tools import classify_unsubscribe_method, parse_list_unsu
 class UnsubscribeExecuteToolBox:
     def __init__(self, message_kind: str):
         self.message_kind = message_kind
+        self.one_click_status = "confirmed"
         self.calls: list[tuple[str, dict[str, object]]] = []
         self._lock = threading.Lock()
 
@@ -51,12 +52,15 @@ class UnsubscribeExecuteToolBox:
 
     def post_one_click_unsubscribe(self, url: str) -> str:
         self._record("post_one_click_unsubscribe", url=url)
+        http_status = 202 if self.one_click_status == "request_accepted" else 204
         return json.dumps(
             {
-                "status": "confirmed",
-                "http_status": 204,
+                "status": self.one_click_status,
+                "sender_unsubscribe_status": self.one_click_status,
+                "gmail_subscription_ui_status": "not_updated_by_agent",
+                "http_status": http_status,
                 "url": url,
-                "evidence": "HTTP 204 response received.",
+                "evidence": f"HTTP {http_status} response received.",
                 "error": "",
             },
             ensure_ascii=False,
@@ -146,7 +150,26 @@ def test_unsubscribe_execute_one_click_posts_after_confirmation():
     assert result.completed is True
     assert result.response is not None
     assert "status: confirmed" in result.response
+    assert "gmail_subscription_ui_status: not_updated_by_agent" in result.response
     assert ("post_one_click_unsubscribe", {"url": "https://example.com/one-click?id=123"}) in toolbox.calls
+
+
+def test_unsubscribe_execute_preserves_one_click_request_accepted_status():
+    toolbox = UnsubscribeExecuteToolBox("one_click")
+    toolbox.one_click_status = "request_accepted"
+    result = _executor_for(toolbox).run(
+        _spec(),
+        skill_arguments={"email_id": "msg-001", "confirmed": True},
+        current_message="Yes, unsubscribe.",
+        intent_decision=type("Intent", (), {"intent": "Confirm unsubscribe."})(),
+        recent_context=[],
+    )
+
+    assert result.completed is True
+    assert result.response is not None
+    assert "status: request_accepted" in result.response
+    assert "sender_unsubscribe_status: request_accepted" in result.response
+    assert "gmail_subscription_ui_status: not_updated_by_agent" in result.response
 
 
 def test_unsubscribe_execute_mailto_sends_request_but_not_confirmed():

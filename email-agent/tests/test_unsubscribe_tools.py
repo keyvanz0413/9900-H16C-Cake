@@ -189,3 +189,31 @@ def test_post_one_click_unsubscribe_posts_expected_form_body(monkeypatch):
     request = calls[0][0]
     assert request.get_method() == "POST"
     assert request.data == b"List-Unsubscribe=One-Click"
+
+
+def test_post_one_click_unsubscribe_treats_202_as_request_accepted(monkeypatch):
+    class _Response:
+        status = 202
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def getcode(self):
+            return 202
+
+        def read(self, size):
+            return b"Unsubscribe Request Accepted"
+
+    def fake_urlopen(request, timeout):
+        return _Response()
+
+    monkeypatch.setattr(unsubscribe_tools, "urlopen", fake_urlopen)
+
+    payload = json.loads(post_one_click_unsubscribe("https://example.com/unsub?id=123"))
+
+    assert payload["status"] == "request_accepted"
+    assert payload["sender_unsubscribe_status"] == "request_accepted"
+    assert payload["gmail_subscription_ui_status"] == "not_updated_by_agent"
