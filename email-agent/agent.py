@@ -9,7 +9,8 @@ import os
 from pathlib import Path
 
 from connectonion import Agent, Memory, WebFetch, Shell, TodoList
-from connectonion.useful_plugins import re_act, calendar_plugin
+from connectonion.useful_plugins import re_act
+from plugins.calendar_approval_plugin import calendar_approval_plugin
 from plugins.gmail_sync_plugin import build_gmail_sync_plugin
 from tools.attachment_text_tool import extract_recent_attachment_texts_from_email_tool
 from intent_layer import (
@@ -99,7 +100,7 @@ if has_gmail:
     tools.append(GmailCompat())
     tools.append(GoogleCalendar())
     plugins.append(build_gmail_sync_plugin(_get_primary_email_tool))
-    plugins.append(calendar_plugin)
+    plugins.append(calendar_approval_plugin)
 elif has_outlook:
     from connectonion import Outlook, MicrosoftCalendar
     tools.append(Outlook())
