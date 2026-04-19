@@ -7,11 +7,10 @@ Pattern: Use ConnectOnion email tools + Memory system + Calendar + Shell + Plugi
 
 import os
 from pathlib import Path
-from datetime import datetime
 
 from connectonion import Agent, Memory, WebFetch, Shell, TodoList
-from connectonion.core.events import after_each_tool
 from connectonion.useful_plugins import re_act, calendar_plugin
+from plugins.gmail_sync_plugin import build_gmail_sync_plugin
 from tools.attachment_text_tool import extract_recent_attachment_texts_from_email_tool
 from intent_layer import (
     IntentLayerOrchestrator,
@@ -58,48 +57,6 @@ def _get_primary_email_tool():
     return None
 
 
-@after_each_tool
-def sync_crm_after_send_compat(agent_instance) -> None:
-    current_session = getattr(agent_instance, "current_session", None)
-    if not isinstance(current_session, dict):
-        return
-
-    trace = (current_session.get("trace") or [])[-1:]  # type: ignore[index]
-    if not trace:
-        return
-    latest_trace = trace[0]
-    if not isinstance(latest_trace, dict):
-        return
-    if latest_trace.get("type") != "tool_result":
-        return
-    if latest_trace.get("name") not in {"send", "reply"}:
-        return
-    if latest_trace.get("status") != "success":
-        return
-
-    args = latest_trace.get("args") or {}
-    if not isinstance(args, dict):
-        return
-
-    to = str(args.get("to") or "").strip()
-    if not to:
-        return
-
-    email_tool = _get_primary_email_tool()
-    if email_tool is None or not hasattr(email_tool, "update_contact"):
-        return
-
-    try:
-        today = datetime.now().strftime("%Y-%m-%d")
-        result = email_tool.update_contact(to, last_contact=today, next_contact_date="")
-    except Exception as exc:
-        print(f"[crm-sync] failed to update contact after send for {to}: {exc}", flush=True)
-        return
-
-    if "Updated" in str(result or ""):
-        print(f"[crm-sync] updated contact after send: {to}", flush=True)
-
-
 def extract_recent_attachment_texts(query: str, max_results: int = 10) -> str:
     """Extract text from attachments in recent Gmail inbox emails.
 
@@ -141,7 +98,7 @@ if has_gmail:
 
     tools.append(GmailCompat())
     tools.append(GoogleCalendar())
-    plugins.append([sync_crm_after_send_compat])
+    plugins.append(build_gmail_sync_plugin(_get_primary_email_tool))
     plugins.append(calendar_plugin)
 elif has_outlook:
     from connectonion import Outlook, MicrosoftCalendar
