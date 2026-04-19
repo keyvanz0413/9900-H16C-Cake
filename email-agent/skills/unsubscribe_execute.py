@@ -12,7 +12,7 @@ MAX_DAYS = 90
 DEFAULT_MAX_RESULTS = 100
 MAX_RESULTS_CAP = 250
 EMAIL_ID_PATTERN = re.compile(r"^\s*ID:\s*(\S+)\s*$", re.MULTILINE)
-SEARCH_RESULT_FROM_PATTERN = re.compile(r"^(?:\d+\.\s+)?From:\s*(.+)$")
+SEARCH_RESULT_FROM_PATTERN = re.compile(r"^(?:\d+\.\s+)?(?:\[[^\]]+\]\s+)*From:\s*(.+)$")
 METHOD_PRIORITY = {
     "one_click": 0,
     "mailto": 1,

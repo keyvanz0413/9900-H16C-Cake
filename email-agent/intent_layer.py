@@ -1307,6 +1307,8 @@ class IntentLayerOrchestrator:
         intent_decision: IntentDecision,
         step: PlannedStep,
         read_results: tuple[StepExecutionResult, ...],
+        older_context: list[DialogueItem],
+        recent_context: list[DialogueItem],
     ) -> dict[str, Any]:
         serialized_read_results = [serialize_step_result(result) for result in read_results]
         prompt = "\n\n".join(
@@ -1315,6 +1317,10 @@ class IntentLayerOrchestrator:
                 intent_decision.intent,
                 "[STEP_GOAL]",
                 step.goal,
+                "[OLDER_CONTEXT]",
+                format_context(older_context),
+                "[RECENT_CONTEXT]",
+                format_context(recent_context),
                 "[CURRENT_SKILL]",
                 "\n".join(
                     [
@@ -1361,6 +1367,7 @@ class IntentLayerOrchestrator:
         read_results: tuple[StepExecutionResult, ...],
         user_message: str,
         intent_decision: IntentDecision,
+        older_context: list[DialogueItem],
         recent_context: list[DialogueItem],
         max_iterations: int | None,
     ) -> StepExecutionResult:
@@ -1372,6 +1379,8 @@ class IntentLayerOrchestrator:
             intent_decision=intent_decision,
             step=step,
             read_results=read_results,
+            older_context=older_context,
+            recent_context=recent_context,
         )
         self._log_route(
             "skill_execution_started",
@@ -1554,6 +1563,7 @@ class IntentLayerOrchestrator:
                         read_results=read_results,
                         user_message=user_message,
                         intent_decision=intent_decision,
+                        older_context=older_context,
                         recent_context=recent_context,
                         max_iterations=max_iterations,
                     )
