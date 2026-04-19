@@ -26,6 +26,7 @@ SKILL_SELECTOR_MODEL_NAME = os.getenv("SKILL_SELECTOR_MODEL", INTENT_MODEL_NAME)
 SKILL_FINALIZER_MODEL_NAME = os.getenv("SKILL_FINALIZER_MODEL", INTENT_MODEL_NAME)
 WRITING_STYLE_MODEL_NAME = os.getenv("WRITING_STYLE_MODEL", INTENT_MODEL_NAME)
 USER_MEMORY_MODEL_NAME = os.getenv("USER_MEMORY_MODEL", INTENT_MODEL_NAME)
+AGENT_TIMEZONE = os.getenv("AGENT_TIMEZONE", os.getenv("TZ", "Australia/Sydney"))
 
 BASE_DIR = Path(__file__).resolve().parent
 PROMPTS_DIR = BASE_DIR / "prompts"
@@ -233,6 +234,7 @@ agent = IntentLayerOrchestrator(
     memory_store=memory_store,
     skill_registry_path=SKILL_REGISTRY_PATH,
     writing_style_path=WRITING_STYLE_PATH,
+    timezone_name=AGENT_TIMEZONE,
 )
 
 # Example usage

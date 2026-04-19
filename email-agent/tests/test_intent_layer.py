@@ -576,6 +576,9 @@ def test_orchestrator_handoff_to_main_agent_and_updates_user_files(tmp_path: Pat
     assert len(main_agent.calls) == 1
     handoff_prompt, forwarded_max_iterations, _, _, _ = main_agent.calls[0]
     assert "[INTENT_LAYER_HANDOFF]" in handoff_prompt
+    assert "[DATE_GROUNDING]" in handoff_prompt
+    assert "today: " in handoff_prompt
+    assert "tomorrow: " in handoff_prompt
     assert "intent: Draft a reply to the user's email request." in handoff_prompt
     assert "skill_selector: route to main agent" in handoff_prompt
     assert forwarded_max_iterations == 7
@@ -2221,5 +2224,8 @@ def test_intent_prompt_includes_writing_style_markdown(tmp_path: Path):
 
     assert result == "should not run"
     intent_prompt = intent_agent.calls[0][0]
+    assert "[DATE_GROUNDING]" in intent_prompt
+    assert "today: " in intent_prompt
+    assert "tomorrow: " in intent_prompt
     assert "[WRITING_STYLE]" in intent_prompt
     assert "Friendly, concise, and email-focused." in intent_prompt

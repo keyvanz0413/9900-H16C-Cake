@@ -5,9 +5,11 @@ import importlib.util
 import json
 import inspect
 import threading
+from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Protocol
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 CONTEXT_WINDOW_LIMIT = 50
@@ -787,6 +789,7 @@ class IntentLayerOrchestrator:
         memory_store: MarkdownMemoryStore,
         skill_registry_path: Path,
         writing_style_path: Path | None = None,
+        timezone_name: str | None = None,
     ):
         self._main_agent = main_agent
         self._intent_agent = intent_agent
@@ -796,6 +799,7 @@ class IntentLayerOrchestrator:
         self._memory_store = memory_store
         self._skill_registry_path = skill_registry_path
         self._writing_style_path = writing_style_path
+        self._timezone_name = _normalize_text(timezone_name) or None
         self._fallback_dialogue_items: list[dict[str, str]] = []
         self._dialogue_items_by_session_id: dict[str, list[dict[str, str]]] = {}
         self._lock = threading.RLock()
@@ -820,6 +824,7 @@ class IntentLayerOrchestrator:
             profile_markdown = self._memory_store.read_profile()
             habits_markdown = self._memory_store.read_habits()
             writing_style_markdown = self._read_writing_style_markdown()
+            date_grounding = self._build_date_grounding()
 
             intent_decision = self._analyze_intent(
                 current_message=prompt,
@@ -828,6 +833,7 @@ class IntentLayerOrchestrator:
                 profile_markdown=profile_markdown,
                 habits_markdown=habits_markdown,
                 writing_style_markdown=writing_style_markdown,
+                date_grounding=date_grounding,
             )
 
             if intent_decision.should_direct_respond:
@@ -925,6 +931,7 @@ class IntentLayerOrchestrator:
                         user_message=prompt,
                         intent_decision=intent_decision,
                         recent_context=recent_context,
+                        date_grounding=date_grounding,
                         skill_selection=selection,
                         skill_execution_result=skill_execution_result,
                         max_iterations=max_iterations,
@@ -1036,6 +1043,7 @@ class IntentLayerOrchestrator:
         profile_markdown: str,
         habits_markdown: str,
         writing_style_markdown: str,
+        date_grounding: str,
     ) -> IntentDecision:
         prompt = "\n\n".join(
             [
@@ -1051,6 +1059,8 @@ class IntentLayerOrchestrator:
                 habits_markdown,
                 "[WRITING_STYLE]",
                 writing_style_markdown,
+                "[DATE_GROUNDING]",
+                date_grounding,
             ]
         )
 
@@ -1090,6 +1100,31 @@ class IntentLayerOrchestrator:
         if path is None:
             return DEFAULT_WRITING_STYLE
         return MarkdownMemoryStore._read_or_default(path, DEFAULT_WRITING_STYLE)
+
+    def _build_date_grounding(self) -> str:
+        timezone_name = self._timezone_name or "system-local"
+        timezone = None
+        if self._timezone_name:
+            try:
+                timezone = ZoneInfo(self._timezone_name)
+            except ZoneInfoNotFoundError:
+                timezone = None
+
+        now = datetime.now(timezone) if timezone is not None else datetime.now().astimezone()
+        today = now.date()
+        yesterday = today - timedelta(days=1)
+        tomorrow = today + timedelta(days=1)
+        day_after_tomorrow = today + timedelta(days=2)
+
+        return "\n".join(
+            [
+                f"timezone: {timezone_name}",
+                f"today: {today.isoformat()}",
+                f"tomorrow: {tomorrow.isoformat()}",
+                f"yesterday: {yesterday.isoformat()}",
+                f"day_after_tomorrow: {day_after_tomorrow.isoformat()}",
+            ]
+        )
 
     def _select_skill(
         self,
@@ -1236,6 +1271,7 @@ class IntentLayerOrchestrator:
         user_message: str,
         intent_decision: IntentDecision,
         recent_context: list[DialogueItem],
+        date_grounding: str,
         skill_selection: SkillSelection,
         skill_execution_result: SkillExecutionResult | None,
         max_iterations: int | None,
@@ -1262,6 +1298,9 @@ class IntentLayerOrchestrator:
             )
         handoff_sections.extend(
             [
+                "",
+                "[DATE_GROUNDING]",
+                date_grounding,
                 "",
                 "[RECENT_CONTEXT]",
                 format_context(recent_context),
