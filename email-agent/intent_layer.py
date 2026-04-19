@@ -25,6 +25,11 @@ DEFAULT_USER_HABITS = """# User Habits
 - No confirmed habits yet.
 """
 
+DEFAULT_WRITING_STYLE = """# Writing Style
+
+- No writing style profile yet.
+"""
+
 SKIP_UPDATE_MARKERS = {
     "",
     "none",
@@ -781,6 +786,7 @@ class IntentLayerOrchestrator:
         skill_executor: SupportsSkillExecution | None,
         memory_store: MarkdownMemoryStore,
         skill_registry_path: Path,
+        writing_style_path: Path | None = None,
     ):
         self._main_agent = main_agent
         self._intent_agent = intent_agent
@@ -789,6 +795,7 @@ class IntentLayerOrchestrator:
         self._skill_executor = skill_executor
         self._memory_store = memory_store
         self._skill_registry_path = skill_registry_path
+        self._writing_style_path = writing_style_path
         self._fallback_dialogue_items: list[dict[str, str]] = []
         self._dialogue_items_by_session_id: dict[str, list[dict[str, str]]] = {}
         self._lock = threading.RLock()
@@ -812,6 +819,7 @@ class IntentLayerOrchestrator:
             older_context, recent_context = split_context(self._deserialize_dialogue(dialogue_store))
             profile_markdown = self._memory_store.read_profile()
             habits_markdown = self._memory_store.read_habits()
+            writing_style_markdown = self._read_writing_style_markdown()
 
             intent_decision = self._analyze_intent(
                 current_message=prompt,
@@ -819,6 +827,7 @@ class IntentLayerOrchestrator:
                 recent_context=recent_context,
                 profile_markdown=profile_markdown,
                 habits_markdown=habits_markdown,
+                writing_style_markdown=writing_style_markdown,
             )
 
             if intent_decision.should_direct_respond:
@@ -1026,6 +1035,7 @@ class IntentLayerOrchestrator:
         recent_context: list[DialogueItem],
         profile_markdown: str,
         habits_markdown: str,
+        writing_style_markdown: str,
     ) -> IntentDecision:
         prompt = "\n\n".join(
             [
@@ -1039,6 +1049,8 @@ class IntentLayerOrchestrator:
                 profile_markdown,
                 "[USER_HABITS]",
                 habits_markdown,
+                "[WRITING_STYLE]",
+                writing_style_markdown,
             ]
         )
 
@@ -1072,6 +1084,12 @@ class IntentLayerOrchestrator:
             reason=_require_non_empty_string(payload.get("reason"), field_name="reason", error_type=IntentLayerError),
             user_update_summary=str(payload.get("user_update_summary") or "").strip(),
         )
+
+    def _read_writing_style_markdown(self) -> str:
+        path = self._writing_style_path
+        if path is None:
+            return DEFAULT_WRITING_STYLE
+        return MarkdownMemoryStore._read_or_default(path, DEFAULT_WRITING_STYLE)
 
     def _select_skill(
         self,

@@ -2160,3 +2160,66 @@ def test_skill_selector_rejects_unknown_structured_arguments(tmp_path: Path):
         raise AssertionError("Expected SkillLayerError to be raised.")
     except SkillLayerError:
         pass
+
+
+def test_intent_prompt_includes_writing_style_markdown(tmp_path: Path):
+    main_agent = FakeAgent(["should not run"], name="main-agent", max_iterations=15)
+    intent_agent = FakeAgent(
+        [
+            json.dumps(
+                {
+                    "intent": "用户想让我学习其当前邮件写作风格。",
+                    "no_execution_confidence": 2,
+                    "final_response": None,
+                    "reason": "This should continue into downstream execution.",
+                    "user_update_summary": "No meaningful update.",
+                }
+            )
+        ],
+        name="intent-agent",
+    )
+    selector_agent = FakeAgent(["should not be called because registry is empty"])
+    writer_agent = FakeAgent(
+        [
+            json.dumps(
+                {
+                    "should_update": False,
+                    "profile_markdown": None,
+                    "habits_markdown": None,
+                    "reason": "Nothing new to store.",
+                }
+            )
+        ],
+        name="memory-writer",
+    )
+
+    store = MarkdownMemoryStore(
+        profile_path=tmp_path / "USER_PROFILE.md",
+        habits_path=tmp_path / "USER_HABITS.md",
+        writer_agent=writer_agent,
+    )
+    registry_path = tmp_path / "registry.yaml"
+    registry_path.write_text("skills: []\n", encoding="utf-8")
+    writing_style_path = tmp_path / "WRITING_STYLE.md"
+    writing_style_path.write_text(
+        "# Writing Style\n\n- Friendly, concise, and email-focused.\n",
+        encoding="utf-8",
+    )
+
+    orchestrator = IntentLayerOrchestrator(
+        main_agent=main_agent,
+        intent_agent=intent_agent,
+        skill_selector_agent=selector_agent,
+        skill_finalizer_agent=make_noop_skill_finalizer(),
+        skill_executor=None,
+        memory_store=store,
+        skill_registry_path=registry_path,
+        writing_style_path=writing_style_path,
+    )
+
+    result = orchestrator.input("学习我的写作风格")
+
+    assert result == "should not run"
+    intent_prompt = intent_agent.calls[0][0]
+    assert "[WRITING_STYLE]" in intent_prompt
+    assert "Friendly, concise, and email-focused." in intent_prompt

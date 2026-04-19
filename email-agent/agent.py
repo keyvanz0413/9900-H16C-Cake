@@ -232,6 +232,7 @@ agent = IntentLayerOrchestrator(
     skill_executor=skill_executor,
     memory_store=memory_store,
     skill_registry_path=SKILL_REGISTRY_PATH,
+    writing_style_path=WRITING_STYLE_PATH,
 )
 
 # Example usage
