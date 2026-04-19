@@ -3,15 +3,12 @@ from __future__ import annotations
 import json
 import base64
 
-from tools.unsubscribe_tools import (
-    classify_unsubscribe_method,
-    extract_unsubscribe_links_from_email_tool,
-    get_email_headers_from_email_tool,
-    parse_mailto_url,
-    parse_list_unsubscribe_header,
+from tools.unsubscribe_tool import (
     post_one_click_unsubscribe,
+    build_get_unsubscribe_info_tool,
+    get_unsubscribe_info_from_email_tool,
 )
-import tools.unsubscribe_tools as unsubscribe_tools
+import tools.unsubscribe_tool as unsubscribe_tool_module
 
 
 class _Execute:
@@ -56,109 +53,6 @@ class _FakeEmailTool:
         return self._service
 
 
-def test_parse_list_unsubscribe_header_splits_https_and_mailto_values():
-    payload = json.loads(
-        parse_list_unsubscribe_header(
-            "<https://example.com/unsub?id=123>, <mailto:unsubscribe@example.com?subject=unsubscribe>"
-        )
-    )
-
-    assert payload["https_urls"] == ["https://example.com/unsub?id=123"]
-    assert payload["mailto_urls"] == ["mailto:unsubscribe@example.com?subject=unsubscribe"]
-    assert payload["other_values"] == []
-
-
-def test_classify_unsubscribe_method_detects_one_click_when_post_header_exists():
-    parsed = {
-        "https_urls": ["https://example.com/unsub?id=123"],
-        "mailto_urls": ["mailto:unsubscribe@example.com"],
-    }
-
-    payload = json.loads(
-        classify_unsubscribe_method(
-            parsed_list_unsubscribe=parsed,
-            list_unsubscribe_post="List-Unsubscribe=One-Click",
-        )
-    )
-
-    assert payload["method"] == "one_click"
-    assert payload["one_click_url"] == "https://example.com/unsub?id=123"
-    assert payload["mailto_url"] is None
-
-
-def test_classify_unsubscribe_method_prefers_mailto_over_website_without_one_click():
-    parsed = {
-        "https_urls": ["https://example.com/preferences"],
-        "mailto_urls": ["mailto:unsubscribe@example.com?subject=unsubscribe"],
-    }
-
-    payload = json.loads(
-        classify_unsubscribe_method(
-            parsed_list_unsubscribe=parsed,
-            list_unsubscribe_post="",
-        )
-    )
-
-    assert payload["method"] == "mailto"
-    assert payload["mailto_url"] == "mailto:unsubscribe@example.com?subject=unsubscribe"
-    assert payload["website_url"] == "https://example.com/preferences"
-
-
-def test_get_email_headers_fetches_metadata_headers_only():
-    calls = []
-    message_payloads = {
-        "msg-001": {
-            "id": "msg-001",
-            "threadId": "thread-001",
-            "payload": {
-                "headers": [
-                    {"name": "From", "value": "News <news@example.com>"},
-                    {"name": "Subject", "value": "Weekly update"},
-                    {"name": "List-Unsubscribe", "value": "<https://example.com/unsub>"},
-                    {"name": "List-Unsubscribe-Post", "value": "List-Unsubscribe=One-Click"},
-                ]
-            },
-        }
-    }
-    service = _FakeService(message_payloads, calls)
-    email_tool = _FakeEmailTool(service)
-
-    payload = json.loads(
-        get_email_headers_from_email_tool(
-            email_tool=email_tool,
-            email_id="msg-001",
-            header_names=["From", "List-Unsubscribe", "List-Unsubscribe-Post"],
-        )
-    )
-
-    assert payload["ok"] is True
-    assert payload["email_id"] == "msg-001"
-    assert payload["headers"]["From"] == "News <news@example.com>"
-    assert payload["headers"]["List-Unsubscribe"] == "<https://example.com/unsub>"
-    assert calls == [
-        (
-            "message_get",
-            {
-                "userId": "me",
-                "id": "msg-001",
-                "format": "metadata",
-                "metadataHeaders": ["From", "List-Unsubscribe", "List-Unsubscribe-Post"],
-            },
-        )
-    ]
-
-
-def test_parse_mailto_url_extracts_send_fields():
-    payload = json.loads(
-        parse_mailto_url("mailto:unsubscribe@example.com?subject=Remove%20me&body=Please%20unsubscribe")
-    )
-
-    assert payload["ok"] is True
-    assert payload["to"] == "unsubscribe@example.com"
-    assert payload["subject"] == "Remove me"
-    assert payload["body"] == "Please unsubscribe"
-
-
 def test_post_one_click_unsubscribe_posts_expected_form_body(monkeypatch):
     calls = []
 
@@ -181,7 +75,7 @@ def test_post_one_click_unsubscribe_posts_expected_form_body(monkeypatch):
         calls.append((request, timeout))
         return _Response()
 
-    monkeypatch.setattr(unsubscribe_tools, "urlopen", fake_urlopen)
+    monkeypatch.setattr(unsubscribe_tool_module, "urlopen", fake_urlopen)
 
     payload = json.loads(post_one_click_unsubscribe("https://example.com/unsub?id=123", timeout_seconds=3))
 
@@ -212,7 +106,7 @@ def test_post_one_click_unsubscribe_treats_202_as_request_accepted(monkeypatch):
     def fake_urlopen(request, timeout):
         return _Response()
 
-    monkeypatch.setattr(unsubscribe_tools, "urlopen", fake_urlopen)
+    monkeypatch.setattr(unsubscribe_tool_module, "urlopen", fake_urlopen)
 
     payload = json.loads(post_one_click_unsubscribe("https://example.com/unsub?id=123"))
 
@@ -225,19 +119,105 @@ def _encode_text(value: str) -> str:
     return base64.urlsafe_b64encode(value.encode("utf-8")).decode("utf-8").rstrip("=")
 
 
-def test_extract_unsubscribe_links_from_email_preserves_html_href():
+def test_build_get_unsubscribe_info_tool_exposes_expected_name_and_error_shape():
+    tool = build_get_unsubscribe_info_tool(lambda: None)
+
+    payload = json.loads(tool(["msg-001"]))
+
+    assert tool.__name__ == "get_unsubscribe_info"
+    assert payload["summary"]["requested_count"] == 1
+    assert payload["summary"]["analyzed_count"] == 0
+    assert payload["summary"]["error_count"] == 1
+    assert payload["items"] == [
+        {
+            "email_id": "msg-001",
+            "error": "Unsubscribe inspection is only available when Gmail is connected.",
+        }
+    ]
+
+
+def test_get_unsubscribe_info_from_email_tool_batches_and_omits_missing_options():
     calls = []
     message_payloads = {
-        "msg-html": {
-            "id": "msg-html",
+        "msg-one": {
+            "id": "msg-one",
             "payload": {
+                "headers": [
+                    {
+                        "name": "List-Unsubscribe",
+                        "value": "<https://example.com/unsub?id=123>, <mailto:unsubscribe@example.com?subject=unsubscribe>",
+                    },
+                    {"name": "List-Unsubscribe-Post", "value": "List-Unsubscribe=One-Click"},
+                ]
+            },
+        },
+        "msg-mail": {
+            "id": "msg-mail",
+            "payload": {
+                "headers": [
+                    {
+                        "name": "List-Unsubscribe",
+                        "value": "<mailto:leave@example.com?subject=unsubscribe&body=please%20remove%20me>",
+                    }
+                ]
+            },
+        },
+    }
+    service = _FakeService(message_payloads, calls)
+    email_tool = _FakeEmailTool(service)
+
+    payload = json.loads(
+        get_unsubscribe_info_from_email_tool(
+            email_tool=email_tool,
+            email_ids=["msg-one", "msg-mail"],
+        )
+    )
+
+    assert payload["summary"] == {
+        "requested_count": 2,
+        "analyzed_count": 2,
+        "error_count": 0,
+    }
+
+    first_item = payload["items"][0]
+    assert first_item["email_id"] == "msg-one"
+    assert first_item["unsubscribe"]["method"] == "one_click"
+    assert set(first_item["unsubscribe"]["options"].keys()) == {"one_click", "mailto"}
+    assert first_item["unsubscribe"]["options"]["one_click"]["request_payload"] == {
+        "url": "https://example.com/unsub?id=123"
+    }
+    assert first_item["unsubscribe"]["options"]["mailto"]["send_payload"] == {
+        "to": "unsubscribe@example.com",
+        "subject": "unsubscribe",
+        "body": "",
+    }
+    assert "website" not in first_item["unsubscribe"]["options"]
+
+    second_item = payload["items"][1]
+    assert second_item["email_id"] == "msg-mail"
+    assert second_item["unsubscribe"]["method"] == "mailto"
+    assert set(second_item["unsubscribe"]["options"].keys()) == {"mailto"}
+    assert second_item["unsubscribe"]["options"]["mailto"]["send_payload"] == {
+        "to": "leave@example.com",
+        "subject": "unsubscribe",
+        "body": "please remove me",
+    }
+
+
+def test_get_unsubscribe_info_from_email_tool_promotes_manual_body_link_to_website():
+    calls = []
+    message_payloads = {
+        "msg-site": {
+            "id": "msg-site",
+            "payload": {
+                "headers": [],
                 "mimeType": "multipart/alternative",
                 "parts": [
                     {
                         "mimeType": "text/html",
                         "body": {
                             "data": _encode_text(
-                                '<html><body><a href="https://example.com/unsub?token=abc">Click here to unsubscribe</a></body></html>'
+                                '<html><body><a href="https://example.com/manual-unsub?token=abc">Unsubscribe</a></body></html>'
                             )
                         },
                     }
@@ -249,22 +229,23 @@ def test_extract_unsubscribe_links_from_email_preserves_html_href():
     email_tool = _FakeEmailTool(service)
 
     payload = json.loads(
-        extract_unsubscribe_links_from_email_tool(
+        get_unsubscribe_info_from_email_tool(
             email_tool=email_tool,
-            email_id="msg-html",
+            email_ids=["msg-site"],
         )
     )
 
-    assert payload["ok"] is True
-    assert payload["links"][0]["url"] == "https://example.com/unsub?token=abc"
-    assert payload["links"][0]["anchor_text"] == "Click here to unsubscribe"
-    assert calls == [
-        (
-            "message_get",
-            {
-                "userId": "me",
-                "id": "msg-html",
-                "format": "full",
-            },
-        )
-    ]
+    item = payload["items"][0]
+    assert item["email_id"] == "msg-site"
+    assert item["unsubscribe"]["method"] == "website"
+    assert item["unsubscribe"]["options"] == {
+        "website": {
+            "manual_links": [
+                {
+                    "label": "Unsubscribe",
+                    "source": "text/html",
+                    "url": "https://example.com/manual-unsub?token=abc",
+                }
+            ]
+        }
+    }

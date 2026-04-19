@@ -162,6 +162,49 @@ run("date") → find_free_slots() → search_emails() → create_meet()
 - Use after user reviews emails
 - Get email_id from previous read/search results
 
+### 5A. Unsubscribe Workflows
+
+**Tools:**
+- `get_unsubscribe_info(email_ids, max_manual_links=5)` - Inspect one or more messages and return execution-ready unsubscribe metadata
+- `post_one_click_unsubscribe(url)` - Execute RFC 8058 one-click unsubscribe after explicit confirmation
+- `send(to, subject, body)` - Send a mailto unsubscribe request only when `get_unsubscribe_info` already returned the exact payload
+
+**If user says "find newsletters I can unsubscribe from" or "show me subscription emails", you MUST immediately:**
+1. `search_emails(...)` - find recent newsletter / marketing / subscription candidates
+2. Collect the returned email ids
+3. `get_unsubscribe_info(email_ids, max_manual_links=5)` - inspect execution-ready unsubscribe metadata for those emails
+4. THEN summarize the candidates, grouped clearly, and explain which ones support `one_click`, `mailto`, or only manual website flow
+
+**If user says "unsubscribe me from this / these" and they have explicitly confirmed execution, you MUST:**
+1. Start from the already selected target email ids, or search first if the target emails are not yet identified
+2. `get_unsubscribe_info(email_ids, max_manual_links=5)` - re-read the unsubscribe options for the exact target messages
+3. Loop through the confirmed target emails one by one
+4. For each email:
+   - if method is `one_click`, call `post_one_click_unsubscribe(url)`
+   - if method is `mailto`, call `send(to, subject, body)` using the exact `mailto.send_payload`
+   - if method is `website`, do not open the page automatically; return the manual link and explain that the user must open it manually
+5. THEN report the per-email result clearly, without claiming stronger success than the tool actually returned
+
+**Guidelines:**
+- For unsubscribe discovery, always search first, then pass the candidate message ids into `get_unsubscribe_info`
+- Never guess the unsubscribe method from prose alone; rely on `get_unsubscribe_info`
+- When multiple emails are selected for execution, process them in a loop and report each result separately
+- Only call `post_one_click_unsubscribe` after the user explicitly confirms the unsubscribe action
+- If `get_unsubscribe_info` returns a `mailto.send_payload`, send exactly that payload instead of inventing a new email
+- If only website or manual links are available, explain that the user must open the link manually
+- Never claim that Gmail's Subscriptions UI was updated unless a tool explicitly says so
+
+**Workflow:**
+```
+search_emails(...) → collect email_ids → get_unsubscribe_info(email_ids)
+
+if executing confirmed unsubscribe:
+for each selected email_id:
+  one_click → post_one_click_unsubscribe(url)
+  mailto → send(to, subject, body)
+  website/manual → return manual link only
+```
+
 ---
 
 ### 6. CRM & Contacts

@@ -23,13 +23,11 @@
 #     output: A concise weekly inbox summary.
 skills:
   - name: unsubscribe_discovery
-    description: Discover recent newsletter, marketing, or subscription emails and classify their unsubscribe mechanism from message headers.
+    description: Discover recent newsletter, marketing, or subscription emails and inspect their execution-ready unsubscribe options.
     scope: Read-only unsubscribe discovery workflow. Never sends email, never posts unsubscribe requests, never opens websites, never runs browser automation, and never modifies mailbox state.
     used_tools:
       - search_emails
-      - get_email_headers
-      - parse_list_unsubscribe_header
-      - classify_unsubscribe_method
+      - get_unsubscribe_info
     input_schema:
       days:
         type: int
@@ -41,23 +39,14 @@ skills:
         required: false
         default: 100
         description: Maximum number of recent email search results to inspect, capped at 250.
-      include_body_links:
-        type: bool
-        required: false
-        default: false
-        description: Reserved for a later version; the first version classifies only header-based unsubscribe metadata.
-    output: A read-only unsubscribe candidate list grouped by sender/domain with method classifications one_click, mailto, website, multiple, or unknown.
+    output: A read-only unsubscribe candidate list grouped by sender or domain with execution-ready unsubscribe classifications such as one_click, mailto, website, or unknown.
   - name: unsubscribe_execute
-    description: Execute a user-confirmed unsubscribe action for one specific Gmail message by re-reading its unsubscribe headers and using one_click or mailto when available.
+    description: Execute a user-confirmed unsubscribe action for one specific Gmail message by re-reading its unsubscribe options and using one_click or mailto when available.
     scope: Performs one explicit unsubscribe action only when confirmed=true. Supports RFC 8058 one-click POST and mailto request sending. Does not open websites, does not run browser automation, and does not archive, delete, label, or otherwise modify existing mailbox messages.
     used_tools:
-      - get_email_headers
-      - parse_list_unsubscribe_header
-      - classify_unsubscribe_method
+      - get_unsubscribe_info
       - post_one_click_unsubscribe
-      - parse_mailto_url
       - send
-      - extract_unsubscribe_links_from_email
     input_schema:
       email_id:
         type: string
@@ -73,7 +62,7 @@ skills:
         required: false
         default: false
         description: Must be true only when the user explicitly confirms executing the unsubscribe action.
-    output: An unsubscribe execution result with status confirmed, request_accepted, request_sent, manual_link_available, manual_required, failed, or uncertain, grounded in re-read message headers, execution tool result, and any extracted manual unsubscribe link.
+    output: An unsubscribe execution result with status confirmed, request_accepted, request_sent, manual_link_available, manual_required, failed, or uncertain, grounded in re-read unsubscribe metadata, execution tool result, and any available manual unsubscribe link.
   - name: weekly_email_summary
     description: Summarize recent email activity for a recent time window using mailbox identity, inbox, unanswered, and calendar context.
     scope: Read-only weekly summary workflow. Never send email and never modify mailbox state.

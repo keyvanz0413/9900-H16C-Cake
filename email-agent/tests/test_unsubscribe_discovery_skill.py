@@ -5,7 +5,6 @@ import threading
 from pathlib import Path
 
 from intent_layer import PythonSkillExecutor, SkillInputFieldSpec, SkillSpec, build_tool_function_map
-from tools.unsubscribe_tools import classify_unsubscribe_method, parse_list_unsubscribe_header
 
 
 class UnsubscribeDiscoveryToolBox:
@@ -32,62 +31,88 @@ class UnsubscribeDiscoveryToolBox:
             "   ID: unsub-003\n"
         )
 
-    def get_email_headers(self, email_id: str, header_names=None) -> str:
-        self._record("get_email_headers", email_id=email_id, header_names=header_names)
+    def get_unsubscribe_info(self, email_ids, max_manual_links: int = 5) -> str:
+        self._record("get_unsubscribe_info", email_ids=email_ids, max_manual_links=max_manual_links)
         payloads = {
             "unsub-001": {
-                "ok": True,
                 "email_id": "unsub-001",
-                "thread_id": "thread-001",
-                "headers": {
-                    "From": "Deals <deals@example.com>",
-                    "Subject": "Weekly deals",
-                    "Date": "Fri, 18 Apr 2026 09:00:00 +0000",
-                    "List-Unsubscribe": "<https://example.com/one-click?id=123>",
-                    "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
-                    "List-Id": "<deals.example.com>",
-                    "Precedence": "bulk",
+                "unsubscribe": {
+                    "method": "one_click",
+                    "options": {
+                        "one_click": {
+                            "url": "https://example.com/one-click?id=123",
+                            "request_payload": {"url": "https://example.com/one-click?id=123"},
+                        }
+                    },
                 },
+                "error": "",
             },
             "unsub-002": {
-                "ok": True,
                 "email_id": "unsub-002",
-                "thread_id": "thread-002",
-                "headers": {
-                    "From": "Product <product@vendor.test>",
-                    "Subject": "Product update",
-                    "Date": "Fri, 18 Apr 2026 08:00:00 +0000",
-                    "List-Unsubscribe": "<mailto:unsubscribe@vendor.test?subject=unsubscribe>, <https://vendor.test/preferences>",
-                    "List-Unsubscribe-Post": "",
-                    "List-Id": "<product.vendor.test>",
-                    "Precedence": "bulk",
+                "unsubscribe": {
+                    "method": "mailto",
+                    "options": {
+                        "mailto": {
+                            "url": "mailto:unsubscribe@vendor.test?subject=unsubscribe",
+                            "send_payload": {
+                                "to": "unsubscribe@vendor.test",
+                                "subject": "unsubscribe",
+                                "body": "",
+                            },
+                        },
+                        "website": {
+                            "url": "https://vendor.test/preferences",
+                            "manual_links": [
+                                {
+                                    "url": "https://vendor.test/preferences",
+                                    "label": "Manage preferences",
+                                    "source": "list_unsubscribe_header",
+                                }
+                            ],
+                        },
+                    },
                 },
+                "error": "",
             },
             "unsub-003": {
-                "ok": True,
                 "email_id": "unsub-003",
-                "thread_id": "thread-003",
-                "headers": {
-                    "From": "Alerts <alerts@service.test>",
-                    "Subject": "Account notice",
-                    "Date": "Fri, 18 Apr 2026 07:00:00 +0000",
-                    "List-Unsubscribe": "<https://service.test/email-settings>",
-                    "List-Unsubscribe-Post": "",
-                    "List-Id": "<alerts.service.test>",
-                    "Precedence": "",
+                "unsubscribe": {
+                    "method": "website",
+                    "options": {
+                        "website": {
+                            "url": "https://service.test/email-settings",
+                            "manual_links": [
+                                {
+                                    "url": "https://service.test/email-settings",
+                                    "label": "Email settings",
+                                    "source": "list_unsubscribe_header",
+                                }
+                            ],
+                        }
+                    },
                 },
+                "error": "",
             },
         }
-        return json.dumps(payloads[email_id], ensure_ascii=False)
+        return json.dumps(
+            {
+                "items": [payloads[email_id] for email_id in email_ids],
+                "summary": {
+                    "requested_count": len(email_ids),
+                    "analyzed_count": len(email_ids),
+                    "error_count": 0,
+                },
+                "error": "",
+            },
+            ensure_ascii=False,
+        )
 
 
 def test_unsubscribe_discovery_skill_classifies_candidates_without_side_effect_tools():
     toolbox = UnsubscribeDiscoveryToolBox()
     executor = PythonSkillExecutor(
         skills_directory=Path(__file__).resolve().parent.parent / "skills",
-        tool_function_map=build_tool_function_map(
-            [toolbox, parse_list_unsubscribe_header, classify_unsubscribe_method]
-        ),
+        tool_function_map=build_tool_function_map([toolbox]),
     )
     spec = SkillSpec(
         name="unsubscribe_discovery",
@@ -95,9 +120,7 @@ def test_unsubscribe_discovery_skill_classifies_candidates_without_side_effect_t
         scope="Read-only.",
         used_tools=(
             "search_emails",
-            "get_email_headers",
-            "parse_list_unsubscribe_header",
-            "classify_unsubscribe_method",
+            "get_unsubscribe_info",
         ),
         output="candidate list",
         input_schema=(
@@ -139,7 +162,5 @@ def test_unsubscribe_discovery_skill_classifies_candidates_without_side_effect_t
     called_tool_names = [name for name, _ in toolbox.calls]
     assert called_tool_names == [
         "search_emails",
-        "get_email_headers",
-        "get_email_headers",
-        "get_email_headers",
+        "get_unsubscribe_info",
     ]

@@ -4,15 +4,6 @@ import json
 from typing import Any, Callable
 
 
-HEADER_NAMES = [
-    "From",
-    "Subject",
-    "Date",
-    "List-Unsubscribe",
-    "List-Unsubscribe-Post",
-    "List-Id",
-    "Precedence",
-]
 ALLOWED_METHODS = {"auto", "one_click", "mailto", "website"}
 MANUAL_LINK_FALLBACK_STATUSES = {"failed", "uncertain", "manual_required"}
 
@@ -38,7 +29,7 @@ def _loads_mapping(raw_text: str) -> dict[str, Any]:
     return {}
 
 
-def _normalize_method(raw_method: Any) -> str:
+def _normalize_requested_method(raw_method: Any) -> str:
     method = str(raw_method or "auto").strip().lower()
     if method in {"one-click", "one click", "oneclick"}:
         method = "one_click"
@@ -47,7 +38,31 @@ def _normalize_method(raw_method: Any) -> str:
     return method
 
 
-def _confirmation_result(*, email_id: str, classified_method: str, headers: dict[str, Any], classification: dict[str, Any]) -> dict[str, Any]:
+def _normalize_classified_method(raw_method: Any) -> str:
+    method = str(raw_method or "unknown").strip().lower()
+    if method in {"one-click", "one click", "oneclick"}:
+        return "one_click"
+    if method in {"one_click", "mailto", "website"}:
+        return method
+    return "unknown"
+
+
+def _available_methods(options: dict[str, Any]) -> list[str]:
+    return [method for method in ("one_click", "mailto", "website") if isinstance(options.get(method), dict)]
+
+
+def _resolve_effective_method(requested_method: str, classified_method: str, options: dict[str, Any]) -> str:
+    available_methods = _available_methods(options)
+    if requested_method != "auto":
+        return requested_method
+    if classified_method in available_methods:
+        return classified_method
+    if available_methods:
+        return available_methods[0]
+    return classified_method or "unknown"
+
+
+def _confirmation_result(*, email_id: str, classified_method: str, available_methods: list[str]) -> dict[str, Any]:
     return {
         "completed": True,
         "response": "\n".join(
@@ -56,14 +71,10 @@ def _confirmation_result(*, email_id: str, classified_method: str, headers: dict
                 f"email_id: {email_id}",
                 "status: needs_confirmation",
                 f"classified_method: {classified_method}",
-                f"from: {headers.get('From') or '(unknown)'}",
-                f"subject: {headers.get('Subject') or '(no subject)'}",
+                f"available_methods: {', '.join(available_methods) if available_methods else '(none)'}",
                 "notes:",
                 "- No unsubscribe action was executed because confirmed=false.",
                 "- Reply with explicit confirmation before execution.",
-                "",
-                "[CLASSIFICATION_JSON]",
-                json.dumps(classification, ensure_ascii=False, indent=2, sort_keys=True),
             ]
         ).strip(),
         "reason": "Execution requires explicit user confirmation; no unsubscribe action was performed.",
@@ -71,7 +82,7 @@ def _confirmation_result(*, email_id: str, classified_method: str, headers: dict
 
 
 def _first_manual_link(link_payload: dict[str, Any]) -> dict[str, Any]:
-    links = link_payload.get("links")
+    links = link_payload.get("manual_links")
     if not isinstance(links, list):
         return {}
     for link in links:
@@ -81,16 +92,28 @@ def _first_manual_link(link_payload: dict[str, Any]) -> dict[str, Any]:
         if url.lower().startswith(("http://", "https://")):
             return {
                 "url": url,
-                "label": str(link.get("anchor_text") or "Open unsubscribe page").strip() or "Open unsubscribe page",
+                "label": str(link.get("label") or link.get("anchor_text") or "Open unsubscribe page").strip() or "Open unsubscribe page",
                 "source": str(link.get("source") or "email_body").strip() or "email_body",
                 "kind": str(link.get("kind") or "unsubscribe_link").strip() or "unsubscribe_link",
             }
     return {}
 
 
+def _extract_unsubscribe_item(info_payload: dict[str, Any], email_id: str) -> dict[str, Any]:
+    items = info_payload.get("items")
+    if not isinstance(items, list):
+        return {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("email_id") or "").strip() == email_id:
+            return item
+    return {}
+
+
 def execute_skill(*, arguments, used_tools, skill_spec):
     email_id = str(arguments.get("email_id") or "").strip()
-    requested_method = _normalize_method(arguments.get("method", "auto"))
+    requested_method = _normalize_requested_method(arguments.get("method", "auto"))
     confirmed = bool(arguments.get("confirmed", False))
 
     print(
@@ -105,14 +128,20 @@ def execute_skill(*, arguments, used_tools, skill_spec):
             "reason": "Missing required email_id.",
         }
 
-    _, header_kwargs, header_text = _call_tool(
-        "get_email_headers",
-        used_tools["get_email_headers"],
-        {"email_id": email_id, "header_names": HEADER_NAMES},
+    _, unsubscribe_kwargs, unsubscribe_text = _call_tool(
+        "get_unsubscribe_info",
+        used_tools["get_unsubscribe_info"],
+        {"email_ids": [email_id]},
     )
-    header_payload = _loads_mapping(header_text)
-    headers = header_payload.get("headers") if isinstance(header_payload.get("headers"), dict) else {}
-    if not header_payload.get("ok"):
+    unsubscribe_info = _loads_mapping(unsubscribe_text)
+    unsubscribe_item = _extract_unsubscribe_item(unsubscribe_info, email_id)
+    item_error = str(unsubscribe_item.get("error") or "").strip()
+    unsubscribe = unsubscribe_item.get("unsubscribe") if isinstance(unsubscribe_item.get("unsubscribe"), dict) else {}
+    options = unsubscribe.get("options") if isinstance(unsubscribe.get("options"), dict) else {}
+    classified_method = _normalize_classified_method(unsubscribe.get("method", "unknown"))
+    available_methods = _available_methods(options)
+
+    if item_error or not unsubscribe:
         return {
             "completed": True,
             "response": "\n".join(
@@ -120,36 +149,16 @@ def execute_skill(*, arguments, used_tools, skill_spec):
                     "[UNSUBSCRIBE_EXECUTE_BUNDLE]",
                     f"email_id: {email_id}",
                     "status: failed",
-                    f"reason: Could not fetch message headers: {header_payload.get('error') or 'unknown error'}",
+                    f"reason: Could not fetch unsubscribe metadata: {item_error or 'unknown error'}",
                     "No unsubscribe action was executed.",
                 ]
             ),
-            "reason": "Could not fetch message headers.",
+            "reason": "Could not fetch unsubscribe metadata.",
         }
 
-    list_unsubscribe = str(headers.get("List-Unsubscribe") or "").strip()
-    list_unsubscribe_post = str(headers.get("List-Unsubscribe-Post") or "").strip()
+    effective_method = _resolve_effective_method(requested_method, classified_method, options)
 
-    _, parse_kwargs, parsed_text = _call_tool(
-        "parse_list_unsubscribe_header",
-        used_tools["parse_list_unsubscribe_header"],
-        {"header_value": list_unsubscribe},
-    )
-    parsed_payload = _loads_mapping(parsed_text)
-
-    _, classify_kwargs, classification_text = _call_tool(
-        "classify_unsubscribe_method",
-        used_tools["classify_unsubscribe_method"],
-        {
-            "parsed_list_unsubscribe": parsed_payload,
-            "list_unsubscribe_post": list_unsubscribe_post,
-        },
-    )
-    classification = _loads_mapping(classification_text)
-    classified_method = str(classification.get("method") or "unknown").strip() or "unknown"
-    effective_method = classified_method if requested_method == "auto" else requested_method
-
-    if requested_method != "auto" and requested_method != classified_method:
+    if requested_method != "auto" and requested_method not in available_methods:
         return {
             "completed": True,
             "response": "\n".join(
@@ -159,22 +168,19 @@ def execute_skill(*, arguments, used_tools, skill_spec):
                     "status: failed",
                     f"requested_method: {requested_method}",
                     f"classified_method: {classified_method}",
-                    "reason: Requested method does not match the message headers.",
+                    f"available_methods: {', '.join(available_methods) if available_methods else '(none)'}",
+                    "reason: Requested method is not available for this message.",
                     "No unsubscribe action was executed.",
-                    "",
-                    "[CLASSIFICATION_JSON]",
-                    json.dumps(classification, ensure_ascii=False, indent=2, sort_keys=True),
                 ]
             ),
-            "reason": "Requested method did not match the current header classification.",
+            "reason": "Requested method did not match the current unsubscribe options.",
         }
 
     if not confirmed:
         return _confirmation_result(
             email_id=email_id,
             classified_method=classified_method,
-            headers=headers,
-            classification=classification,
+            available_methods=available_methods,
         )
 
     execution_status = "failed"
@@ -185,15 +191,14 @@ def execute_skill(*, arguments, used_tools, skill_spec):
     execution_tool = "(none)"
     execution_kwargs: dict[str, Any] = {}
     manual_unsubscribe: dict[str, Any] = {}
-    manual_link_tool = "(not run)"
-    manual_link_kwargs: dict[str, Any] = {}
-    manual_link_payload: dict[str, Any] = {}
 
     if effective_method == "one_click":
-        one_click_url = str(classification.get("one_click_url") or "").strip()
+        one_click_option = options.get("one_click") if isinstance(options.get("one_click"), dict) else {}
+        request_payload = one_click_option.get("request_payload") if isinstance(one_click_option.get("request_payload"), dict) else {}
+        one_click_url = str(request_payload.get("url") or one_click_option.get("url") or "").strip()
         if not one_click_url:
             execution_status = "failed"
-            execution_evidence = "No one-click URL was available after re-reading headers."
+            execution_evidence = "No one-click URL was available after re-reading unsubscribe metadata."
         else:
             execution_tool, execution_kwargs, execution_text = _call_tool(
                 "post_one_click_unsubscribe",
@@ -213,117 +218,94 @@ def execute_skill(*, arguments, used_tools, skill_spec):
             execution_evidence = str(execution_payload.get("evidence") or "").strip()
 
     elif effective_method == "mailto":
-        mailto_url = str(classification.get("mailto_url") or "").strip()
-        if not mailto_url:
+        mailto_option = options.get("mailto") if isinstance(options.get("mailto"), dict) else {}
+        send_payload = mailto_option.get("send_payload") if isinstance(mailto_option.get("send_payload"), dict) else {}
+        if not send_payload:
             execution_status = "failed"
-            execution_evidence = "No mailto URL was available after re-reading headers."
+            execution_evidence = "No mailto send payload was available after re-reading unsubscribe metadata."
         else:
-            _, parse_mailto_kwargs, parse_mailto_text = _call_tool(
-                "parse_mailto_url",
-                used_tools["parse_mailto_url"],
-                {"mailto_url": mailto_url},
+            body = str(send_payload.get("body") or "").strip() or "unsubscribe"
+            execution_tool, execution_kwargs, send_text = _call_tool(
+                "send",
+                used_tools["send"],
+                {
+                    "to": str(send_payload.get("to") or "").strip(),
+                    "subject": str(send_payload.get("subject") or "unsubscribe").strip() or "unsubscribe",
+                    "body": body,
+                },
             )
-            mailto_payload = _loads_mapping(parse_mailto_text)
-            if not mailto_payload.get("ok"):
-                execution_status = "failed"
-                sender_unsubscribe_status = "failed"
-                execution_evidence = str(mailto_payload.get("error") or "Could not parse mailto URL.")
-                execution_payload = {"parse_mailto": mailto_payload}
-                execution_tool = "parse_mailto_url"
-                execution_kwargs = parse_mailto_kwargs
-            else:
-                body = str(mailto_payload.get("body") or "").strip()
-                if not body:
-                    body = "unsubscribe"
-                execution_tool, execution_kwargs, send_text = _call_tool(
-                    "send",
-                    used_tools["send"],
-                    {
-                        "to": str(mailto_payload.get("to") or "").strip(),
-                        "subject": str(mailto_payload.get("subject") or "unsubscribe").strip() or "unsubscribe",
-                        "body": body,
-                    },
-                )
-                execution_status = "request_sent"
-                sender_unsubscribe_status = "request_sent"
-                execution_evidence = str(send_text or "Unsubscribe request email sent.").strip()
-                execution_payload = {
-                    "parse_mailto": mailto_payload,
-                    "send_result": send_text,
-                }
+            execution_status = "request_sent"
+            sender_unsubscribe_status = "request_sent"
+            execution_evidence = str(send_text or "Unsubscribe request email sent.").strip()
+            execution_payload = {
+                "send_payload": {
+                    "to": str(send_payload.get("to") or "").strip(),
+                    "subject": str(send_payload.get("subject") or "unsubscribe").strip() or "unsubscribe",
+                    "body": body,
+                },
+                "send_result": send_text,
+            }
 
     elif effective_method == "website":
-        execution_status = "manual_required"
+        website_option = options.get("website") if isinstance(options.get("website"), dict) else {}
+        manual_unsubscribe = _first_manual_link(website_option)
+        if not manual_unsubscribe:
+            website_url = str(website_option.get("url") or "").strip()
+            if website_url:
+                manual_unsubscribe = {
+                    "url": website_url,
+                    "label": "Open unsubscribe page",
+                    "source": "list_unsubscribe_header",
+                    "kind": "unsubscribe_link",
+                }
+        execution_status = "manual_link_available" if manual_unsubscribe else "manual_required"
         sender_unsubscribe_status = "manual_required"
         execution_evidence = (
-            "This message only exposes a website unsubscribe URL. "
+            "This message only exposes a website unsubscribe flow. "
             "Website unsubscribe automation is not implemented in this version."
         )
-        execution_payload = {
-            "website_url": classification.get("website_url"),
-        }
-        website_url = str(classification.get("website_url") or "").strip()
-        if website_url:
-            manual_unsubscribe = {
-                "url": website_url,
-                "label": "Open unsubscribe page",
-                "source": "list_unsubscribe_header",
-                "kind": "unsubscribe_link",
-            }
-            execution_status = "manual_link_available"
+        execution_payload = {"website": website_option}
 
     else:
         execution_status = "failed"
         sender_unsubscribe_status = "failed"
         execution_evidence = f"Unsupported or unknown unsubscribe method: {effective_method}."
 
-    should_extract_manual_link = (
+    should_use_manual_link_fallback = (
         confirmed
         and not manual_unsubscribe
         and execution_status in MANUAL_LINK_FALLBACK_STATUSES
-        and "extract_unsubscribe_links_from_email" in used_tools
     )
-    if should_extract_manual_link:
-        manual_link_tool, manual_link_kwargs, manual_link_text = _call_tool(
-            "extract_unsubscribe_links_from_email",
-            used_tools["extract_unsubscribe_links_from_email"],
-            {"email_id": email_id, "max_links": 5},
-        )
-        manual_link_payload = _loads_mapping(manual_link_text)
-        manual_unsubscribe = _first_manual_link(manual_link_payload)
+    if should_use_manual_link_fallback:
+        website_option = options.get("website") if isinstance(options.get("website"), dict) else {}
+        manual_unsubscribe = _first_manual_link(website_option)
         if manual_unsubscribe:
             execution_status = "manual_link_available"
             if sender_unsubscribe_status in {"failed", "manual_required", "uncertain"}:
                 sender_unsubscribe_status = "manual_required"
             execution_evidence = (
-                f"{execution_evidence} Manual unsubscribe link extracted from the email body."
+                f"{execution_evidence} Manual unsubscribe link is available for the user to open."
                 if execution_evidence
-                else "Manual unsubscribe link extracted from the email body."
+                else "Manual unsubscribe link is available for the user to open."
             )
 
     response_payload = {
         "email_id": email_id,
-        "from": headers.get("From") or "",
-        "subject": headers.get("Subject") or "",
         "requested_method": requested_method,
         "classified_method": classified_method,
+        "available_methods": available_methods,
         "effective_method": effective_method,
         "status": execution_status,
         "sender_unsubscribe_status": sender_unsubscribe_status,
         "gmail_subscription_ui_status": gmail_subscription_ui_status,
         "evidence": execution_evidence,
         "manual_unsubscribe": manual_unsubscribe,
-        "classification": classification,
+        "unsubscribe_info": unsubscribe,
         "execution": execution_payload,
-        "manual_link_extraction": manual_link_payload,
         "tool_calls": {
-            "get_email_headers": header_kwargs,
-            "parse_list_unsubscribe_header": parse_kwargs,
-            "classify_unsubscribe_method": classify_kwargs,
+            "get_unsubscribe_info": unsubscribe_kwargs,
             "execution_tool": execution_tool,
             "execution_arguments": execution_kwargs,
-            "manual_link_tool": manual_link_tool,
-            "manual_link_arguments": manual_link_kwargs,
         },
     }
 

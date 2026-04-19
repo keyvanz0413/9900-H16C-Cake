@@ -5,7 +5,6 @@ import threading
 from pathlib import Path
 
 from intent_layer import PythonSkillExecutor, SkillInputFieldSpec, SkillSpec, build_tool_function_map
-from tools.unsubscribe_tools import classify_unsubscribe_method, parse_list_unsubscribe_header, parse_mailto_url
 
 
 class UnsubscribeExecuteToolBox:
@@ -20,36 +19,76 @@ class UnsubscribeExecuteToolBox:
         with self._lock:
             self.calls.append((tool_name, kwargs))
 
-    def get_email_headers(self, email_id: str, header_names=None) -> str:
-        self._record("get_email_headers", email_id=email_id, header_names=header_names)
+    def get_unsubscribe_info(self, email_ids, max_manual_links: int = 5) -> str:
+        self._record("get_unsubscribe_info", email_ids=email_ids, max_manual_links=max_manual_links)
+        email_id = email_ids[0]
         if self.message_kind == "one_click":
-            headers = {
-                "From": "Deals <deals@example.com>",
-                "Subject": "Weekly deals",
-                "List-Unsubscribe": "<https://example.com/one-click?id=123>",
-                "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
-                "List-Id": "<deals.example.com>",
-                "Precedence": "bulk",
+            unsubscribe = {
+                "method": "one_click",
+                "options": {
+                    "one_click": {
+                        "url": "https://example.com/one-click?id=123",
+                        "request_payload": {"url": "https://example.com/one-click?id=123"},
+                    },
+                    "website": {
+                        "manual_links": [
+                            {
+                                "url": "https://example.com/manual-unsubscribe?token=abc",
+                                "label": "Click here to unsubscribe",
+                                "source": "email_body",
+                            }
+                        ]
+                    },
+                },
             }
         elif self.message_kind == "mailto":
-            headers = {
-                "From": "Vendor <vendor@example.com>",
-                "Subject": "Product news",
-                "List-Unsubscribe": "<mailto:unsubscribe@example.com?subject=unsubscribe>",
-                "List-Unsubscribe-Post": "",
-                "List-Id": "<vendor.example.com>",
-                "Precedence": "bulk",
+            unsubscribe = {
+                "method": "mailto",
+                "options": {
+                    "mailto": {
+                        "url": "mailto:unsubscribe@example.com?subject=unsubscribe",
+                        "send_payload": {
+                            "to": "unsubscribe@example.com",
+                            "subject": "unsubscribe",
+                            "body": "",
+                        },
+                    }
+                },
             }
         else:
-            headers = {
-                "From": "Service <service@example.com>",
-                "Subject": "Account notice",
-                "List-Unsubscribe": "<https://service.example.com/preferences>",
-                "List-Unsubscribe-Post": "",
-                "List-Id": "<service.example.com>",
-                "Precedence": "bulk",
+            unsubscribe = {
+                "method": "website",
+                "options": {
+                    "website": {
+                        "url": "https://service.example.com/preferences",
+                        "manual_links": [
+                            {
+                                "url": "https://service.example.com/preferences",
+                                "label": "Manage preferences",
+                                "source": "list_unsubscribe_header",
+                            }
+                        ],
+                    }
+                },
             }
-        return json.dumps({"ok": True, "email_id": email_id, "headers": headers}, ensure_ascii=False)
+        return json.dumps(
+            {
+                "items": [
+                    {
+                        "email_id": email_id,
+                        "unsubscribe": unsubscribe,
+                        "error": "",
+                    }
+                ],
+                "summary": {
+                    "requested_count": 1,
+                    "analyzed_count": 1,
+                    "error_count": 0,
+                },
+                "error": "",
+            },
+            ensure_ascii=False,
+        )
 
     def post_one_click_unsubscribe(self, url: str) -> str:
         self._record("post_one_click_unsubscribe", url=url)
@@ -69,26 +108,6 @@ class UnsubscribeExecuteToolBox:
             ensure_ascii=False,
         )
 
-    def extract_unsubscribe_links_from_email(self, email_id: str, max_links: int = 5) -> str:
-        self._record("extract_unsubscribe_links_from_email", email_id=email_id, max_links=max_links)
-        return json.dumps(
-            {
-                "ok": True,
-                "email_id": email_id,
-                "links": [
-                    {
-                        "url": "https://example.com/manual-unsubscribe?token=abc",
-                        "anchor_text": "Click here to unsubscribe",
-                        "source": "text/html",
-                        "kind": "unsubscribe_link",
-                    }
-                ],
-                "link_count": 1,
-                "error": "",
-            },
-            ensure_ascii=False,
-        )
-
     def send(self, to: str, subject: str, body: str) -> str:
         self._record("send", to=to, subject=subject, body=body)
         return f"sent to {to} subject={subject}"
@@ -97,9 +116,7 @@ class UnsubscribeExecuteToolBox:
 def _executor_for(toolbox: UnsubscribeExecuteToolBox) -> PythonSkillExecutor:
     return PythonSkillExecutor(
         skills_directory=Path(__file__).resolve().parent.parent / "skills",
-        tool_function_map=build_tool_function_map(
-            [toolbox, parse_list_unsubscribe_header, classify_unsubscribe_method, parse_mailto_url]
-        ),
+        tool_function_map=build_tool_function_map([toolbox]),
     )
 
 
@@ -109,13 +126,9 @@ def _spec() -> SkillSpec:
         description="Execute unsubscribe.",
         scope="Confirmed unsubscribe only.",
         used_tools=(
-            "get_email_headers",
-            "parse_list_unsubscribe_header",
-            "classify_unsubscribe_method",
+            "get_unsubscribe_info",
             "post_one_click_unsubscribe",
-            "parse_mailto_url",
             "send",
-            "extract_unsubscribe_links_from_email",
         ),
         output="execution result",
         input_schema=(
@@ -158,7 +171,7 @@ def test_unsubscribe_execute_requires_confirmation_before_side_effects():
     assert result.completed is True
     assert result.response is not None
     assert "status: needs_confirmation" in result.response
-    assert [name for name, _ in toolbox.calls] == ["get_email_headers"]
+    assert [name for name, _ in toolbox.calls] == ["get_unsubscribe_info"]
 
 
 def test_unsubscribe_execute_one_click_posts_after_confirmation():
@@ -212,10 +225,7 @@ def test_unsubscribe_execute_returns_manual_link_when_one_click_fails():
     assert result.response is not None
     assert "status: manual_link_available" in result.response
     assert "https://example.com/manual-unsubscribe?token=abc" in result.response
-    assert (
-        "extract_unsubscribe_links_from_email",
-        {"email_id": "msg-001", "max_links": 5},
-    ) in toolbox.calls
+    assert "get_unsubscribe_info" in [name for name, _ in toolbox.calls]
 
 
 def test_unsubscribe_execute_mailto_sends_request_but_not_confirmed():
