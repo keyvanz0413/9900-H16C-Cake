@@ -11,6 +11,13 @@ from pathlib import Path
 from connectonion import Agent, Memory, WebFetch, Shell, TodoList
 from connectonion.useful_plugins import re_act, gmail_plugin, calendar_plugin
 from tools.attachment_text_tool import extract_recent_attachment_texts_from_email_tool
+from tools.unsubscribe_tools import (
+    classify_unsubscribe_method,
+    get_email_headers_from_email_tool,
+    parse_mailto_url,
+    parse_list_unsubscribe_header,
+    post_one_click_unsubscribe,
+)
 from intent_layer import (
     IntentLayerOrchestrator,
     MarkdownMemoryStore,
@@ -73,6 +80,26 @@ def extract_recent_attachment_texts(query: str, max_results: int = 10) -> str:
         email_tool=email_tool,
         query=query,
         max_results=max_results,
+    )
+
+
+def get_email_headers(email_id: str, header_names: str = "") -> str:
+    """Fetch selected Gmail message headers as metadata.
+
+    Args:
+        email_id: Gmail message id whose headers should be fetched.
+        header_names: Optional comma-separated string of header names to fetch.
+
+    Returns:
+        JSON containing the selected headers, or an error JSON payload.
+    """
+    email_tool = _get_primary_email_tool()
+    if email_tool is None:
+        return '{"ok": false, "email_id": "", "headers": {}, "error": "Email headers are only available when Gmail is connected."}'
+    return get_email_headers_from_email_tool(
+        email_tool=email_tool,
+        email_id=email_id,
+        header_names=header_names,
     )
 
 
@@ -151,6 +178,15 @@ def init_crm_database(max_emails: int = 500, top_n: int = 10, exclude_domains: s
 tools.extend([memory, shell, todo, init_crm_database])
 if has_gmail:
     tools.append(extract_recent_attachment_texts)
+    tools.extend(
+        [
+            get_email_headers,
+            parse_list_unsubscribe_header,
+            classify_unsubscribe_method,
+            parse_mailto_url,
+            post_one_click_unsubscribe,
+        ]
+    )
 
 # Create main execution agent
 main_agent = Agent(
