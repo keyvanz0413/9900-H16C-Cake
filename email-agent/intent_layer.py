@@ -89,6 +89,7 @@ class SkillSpec:
     used_tools: tuple[str, ...]
     output: str
     input_schema: tuple[SkillInputFieldSpec, ...] = ()
+    resolver_guidance: str = ""
 
 
 @dataclass(frozen=True)
@@ -583,6 +584,7 @@ def _coerce_skill_spec(raw_skill: dict[str, Any]) -> SkillSpec | None:
         used_tools=tuple(str(tool).strip() for tool in used_tools if str(tool).strip()),
         output=str(raw_skill.get("output") or "").strip(),
         input_schema=_coerce_skill_input_schema(raw_skill.get("input_schema")),
+        resolver_guidance=str(raw_skill.get("resolver_guidance") or "").strip(),
     )
 
 
@@ -1331,6 +1333,8 @@ class IntentLayerOrchestrator:
                         _format_skill_input_schema_for_prompt(skill_spec),
                     ]
                 ),
+                "[CURRENT_SKILL_RESOLVER_GUIDANCE]",
+                skill_spec.resolver_guidance or "(none)",
                 "[READ_RESULTS]",
                 json.dumps(serialized_read_results, ensure_ascii=False, indent=2),
             ]

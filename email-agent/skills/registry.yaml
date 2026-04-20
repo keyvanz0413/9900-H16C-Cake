@@ -41,35 +41,40 @@ skills:
         description: Maximum number of recent email search results to inspect, capped at 250.
     output: A read-only unsubscribe candidate list grouped by sender or domain with execution-ready unsubscribe classifications such as one_click, mailto, website, or unknown.
   - name: unsubscribe_execute
-    description: Discover recent newsletter, marketing, or subscription emails, inspect their execution-ready unsubscribe options, and execute user-confirmed unsubscribe actions across the discovered candidate list.
-    scope: Reuses the same discovery pipeline as unsubscribe_discovery, then performs batch execution only when confirmed=true. Supports RFC 8058 one-click POST and mailto request sending. Does not open websites, does not run browser automation, and does not archive, delete, label, or otherwise modify existing mailbox messages.
+    description: Execute unsubscribe for one or more explicit subscription targets. Prefer candidates chosen from the current subscription list when available, otherwise run targeted mailbox discovery for unresolved targets before executing only those targets.
+    scope: Multi-target unsubscribe workflow. It may use candidates selected from the current subscription list or fall back to targeted mailbox discovery per unresolved target. Supports RFC 8058 one-click POST and mailto request sending. Does not open websites, does not run browser automation, and does not archive, delete, label, or otherwise modify existing mailbox messages.
     used_tools:
       - search_emails
       - get_unsubscribe_info
       - post_one_click_unsubscribe
       - send
+    resolver_guidance: For unsubscribe_execute, first inspect any current subscription list present in read_results or recent_context. Return target_queries as a JSON array covering every explicit sender, brand, or subscription target the user wants unsubscribed in this turn. If the current subscription list lets you identify exact candidate ids for one or more targets, return those in candidate_ids as a JSON array. If no reliable candidate id is available for a target, leave it out of candidate_ids. Runtime will not resolve raw target_queries against the current list; unresolved targets fall through to targeted discovery instead.
     input_schema:
+      target_queries:
+        type: list
+        required: true
+        description: One or more explicit sender, brand, domain, or other subscription targets the user wants unsubscribed in this turn.
+      candidate_ids:
+        type: list
+        required: false
+        default: []
+        description: Optional candidate identifiers recovered from the current subscription list for any targets that can be matched reliably before execution.
       days:
         type: int
         required: false
         default: 30
-        description: Number of recent days to inspect for unsubscribe candidates.
+        description: Number of recent days to inspect when targeted mailbox discovery is needed for unresolved unsubscribe targets.
       max_results:
         type: int
         required: false
         default: 100
-        description: Maximum number of matching emails to inspect before grouping them into unsubscribe candidates.
+        description: Maximum number of matching emails to inspect before grouping them into unsubscribe candidates for each targeted discovery search.
       method:
         type: string
         required: false
         default: auto
-        description: Execution method override for all discovered candidates. Use auto unless the user explicitly selects one_click, mailto, or website.
-      confirmed:
-        type: bool
-        required: false
-        default: false
-        description: Must be true only when the user explicitly confirms executing the unsubscribe actions.
-    output: A batch unsubscribe execution result grounded in the same discovery search plus get_unsubscribe_info metadata, with per-candidate statuses such as needs_confirmation, confirmed, request_accepted, request_sent, manual_link_available, manual_required, failed, or uncertain.
+        description: Execution method override for the resolved target candidates. Use auto unless the user explicitly selects one_click, mailto, or website.
+    output: A multi-target unsubscribe execution result grounded in the current visible subscription list plus any fallback targeted mailbox discovery, with separate categories for newly unsubscribed targets, already unsubscribed targets, manual-action-required targets, failed targets, and not-found targets.
   - name: weekly_email_summary
     description: Summarize recent email activity for a recent time window using mailbox identity, inbox, unanswered, and calendar context.
     scope: Read-only weekly summary workflow. Never send email and never modify mailbox state.

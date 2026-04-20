@@ -5,6 +5,7 @@ import threading
 from pathlib import Path
 
 from intent_layer import PythonSkillExecutor, SkillInputFieldSpec, SkillSpec, build_tool_function_map
+from unsubscribe_workflow import candidate_id_for_sender, extract_section_text
 
 
 class UnsubscribeDiscoveryToolBox:
@@ -59,17 +60,7 @@ class UnsubscribeDiscoveryToolBox:
                                 "subject": "unsubscribe",
                                 "body": "",
                             },
-                        },
-                        "website": {
-                            "url": "https://vendor.test/preferences",
-                            "manual_links": [
-                                {
-                                    "url": "https://vendor.test/preferences",
-                                    "label": "Manage preferences",
-                                    "source": "list_unsubscribe_header",
-                                }
-                            ],
-                        },
+                        }
                     },
                 },
                 "error": "",
@@ -108,11 +99,43 @@ class UnsubscribeDiscoveryToolBox:
         )
 
 
-def test_unsubscribe_discovery_skill_classifies_candidates_without_side_effect_tools():
+def _state_payload() -> dict[str, object]:
+    return {
+        "version": 1,
+        "items": [
+            {
+                "candidate_id": candidate_id_for_sender(sender_email="existing@active.test", sender_domain="active.test"),
+                "sender": "Existing Active <existing@active.test>",
+                "sender_email": "existing@active.test",
+                "sender_domain": "active.test",
+                "representative_email_id": "existing-001",
+                "status": "active",
+                "updated_at": "2026-04-20T00:00:00+00:00",
+                "method": "mailto",
+            },
+            {
+                "candidate_id": candidate_id_for_sender(sender_email="alerts@service.test", sender_domain="service.test"),
+                "sender": "Alerts <alerts@service.test>",
+                "sender_email": "alerts@service.test",
+                "sender_domain": "service.test",
+                "representative_email_id": "unsub-003",
+                "status": "hidden_locally_after_unsubscribe",
+                "updated_at": "2026-04-20T00:00:00+00:00",
+                "method": "website",
+            },
+        ],
+    }
+
+
+def test_unsubscribe_discovery_merges_live_results_and_filters_hidden_state(tmp_path):
     toolbox = UnsubscribeDiscoveryToolBox()
+    state_path = tmp_path / "UNSUBSCRIBE_STATE.json"
+    state_path.write_text(json.dumps(_state_payload(), ensure_ascii=False, indent=2), encoding="utf-8")
+
     executor = PythonSkillExecutor(
         skills_directory=Path(__file__).resolve().parent.parent / "skills",
         tool_function_map=build_tool_function_map([toolbox]),
+        skill_runtime={"unsubscribe_state_path": str(state_path)},
     )
     spec = SkillSpec(
         name="unsubscribe_discovery",
@@ -154,10 +177,19 @@ def test_unsubscribe_discovery_skill_classifies_candidates_without_side_effect_t
     assert result.completed is True
     assert result.response is not None
     assert "[UNSUBSCRIBE_DISCOVERY_BUNDLE]" in result.response
-    assert "No POST request, mailto message, website visit, browser automation, archive, or label action was performed." in result.response
-    assert '"method": "one_click"' in result.response
-    assert '"method": "mailto"' in result.response
-    assert '"method": "website"' in result.response
+
+    visible_candidates = json.loads(extract_section_text(result.response, "VISIBLE_CANDIDATES_JSON"))
+    visible_emails = {item["sender_email"] for item in visible_candidates}
+    assert "existing@active.test" in visible_emails
+    assert "deals@example.com" in visible_emails
+    assert "product@vendor.test" in visible_emails
+    assert "alerts@service.test" not in visible_emails
+
+    stored_payload = json.loads(state_path.read_text(encoding="utf-8"))
+    stored_items = {item["candidate_id"]: item for item in stored_payload["items"]}
+    assert len(stored_items) == 4
+    hidden_alerts_id = candidate_id_for_sender(sender_email="alerts@service.test", sender_domain="service.test")
+    assert stored_items[hidden_alerts_id]["status"] == "hidden_locally_after_unsubscribe"
 
     called_tool_names = [name for name, _ in toolbox.calls]
     assert called_tool_names == [

@@ -1,216 +1,101 @@
 from __future__ import annotations
 
-import hashlib
 import json
-import re
-from email.utils import parseaddr
 from typing import Any, Callable
 
+from unsubscribe_state import (
+    HIDDEN_STATUS,
+    index_unsubscribe_state_records,
+    load_unsubscribe_state_records,
+    mark_candidates_hidden_after_unsubscribe,
+    merge_discovered_candidates,
+    visible_unsubscribe_state_records,
+)
+from unsubscribe_workflow import (
+    DEFAULT_DAYS,
+    DEFAULT_MAX_RESULTS,
+    MAX_DAYS,
+    MAX_RESULTS_CAP,
+    build_evidence,
+    build_targeted_search_query,
+    call_tool,
+    clamp_int,
+    collect_candidates,
+    extract_candidate_lists_from_read_results,
+    loads_mapping,
+    match_candidates_by_target_query,
+    normalize_method,
+    risk_level_for_method,
+    sort_candidates,
+)
 
-DEFAULT_DAYS = 30
-MAX_DAYS = 90
-DEFAULT_MAX_RESULTS = 100
-MAX_RESULTS_CAP = 250
-EMAIL_ID_PATTERN = re.compile(r"^\s*ID:\s*(\S+)\s*$", re.MULTILINE)
-SEARCH_RESULT_FROM_PATTERN = re.compile(r"^(?:\d+\.\s+)?(?:\[[^\]]+\]\s+)*From:\s*(.+)$")
-METHOD_PRIORITY = {
-    "one_click": 0,
-    "mailto": 1,
-    "website": 2,
-    "unknown": 3,
-}
+
 ALLOWED_METHODS = {"auto", "one_click", "mailto", "website"}
 MANUAL_LINK_FALLBACK_STATUSES = {"failed", "uncertain", "manual_required"}
-
-
-def _call_tool(name: str, tool_callable: Callable[..., Any], kwargs: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
-    print(f"[skill:unsubscribe_execute] calling {name} with {kwargs}", flush=True)
-    try:
-        result = tool_callable(**kwargs)
-    except Exception as exc:
-        result = f"Error: {exc}"
-    text = str(result or "").strip() or "(empty)"
-    print(f"[skill:unsubscribe_execute] finished {name}", flush=True)
-    return name, kwargs, text
-
-
-def _loads_mapping(raw_text: str) -> dict[str, Any]:
-    try:
-        payload = json.loads(str(raw_text or "").strip())
-    except json.JSONDecodeError:
-        return {}
-    if isinstance(payload, dict):
-        return payload
-    return {}
-
-
-def _extract_email_ids(search_output: str) -> list[str]:
-    email_ids: list[str] = []
-    seen: set[str] = set()
-    for raw_email_id in EMAIL_ID_PATTERN.findall(str(search_output or "")):
-        email_id = raw_email_id.strip()
-        if not email_id or email_id in seen:
-            continue
-        seen.add(email_id)
-        email_ids.append(email_id)
-    return email_ids
-
-
-def _extract_search_entries(search_output: str) -> list[dict[str, str]]:
-    entries: list[dict[str, str]] = []
-    current: dict[str, str] | None = None
-
-    for raw_line in str(search_output or "").splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-
-        from_match = SEARCH_RESULT_FROM_PATTERN.match(line)
-        if from_match:
-            if current and current.get("email_id"):
-                entries.append(current)
-            current = {"from": from_match.group(1).strip()}
-            continue
-
-        if current is None:
-            continue
-
-        if line.startswith("Subject:"):
-            current["subject"] = line.split("Subject:", 1)[1].strip()
-            continue
-
-        if line.startswith("Date:"):
-            current["date"] = line.split("Date:", 1)[1].strip()
-            continue
-
-        if line.startswith("ID:"):
-            current["email_id"] = line.split("ID:", 1)[1].strip()
-
-    if current and current.get("email_id"):
-        entries.append(current)
-
-    if entries:
-        return entries
-
-    return [
-        {
-            "from": "(unknown sender)",
-            "subject": "(no subject)",
-            "email_id": email_id,
-        }
-        for email_id in _extract_email_ids(search_output)
-    ]
-
-
-def _clamp_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        number = default
-    if number < minimum:
-        return minimum
-    if number > maximum:
-        return maximum
-    return number
-
-
-def _build_search_query(days: int) -> str:
-    return (
-        f'in:inbox newer_than:{days}d '
-        '(unsubscribe OR newsletter OR subscription OR "manage preferences" OR "email preferences" OR marketing)'
-    )
-
-
-def _sender_parts(raw_from: str) -> tuple[str, str, str]:
-    display_name, email_address = parseaddr(str(raw_from or "").strip())
-    sender_email = email_address.strip().lower()
-    sender_domain = sender_email.rsplit("@", 1)[-1] if "@" in sender_email else ""
-    sender = str(raw_from or "").strip() or sender_email or "(unknown sender)"
-    if not sender and display_name:
-        sender = display_name
-    return sender, sender_email, sender_domain
-
-
-def _candidate_id(*, sender_email: str, sender_domain: str) -> str:
-    stable_source = "|".join([sender_email, sender_domain]).strip("|") or "unknown"
-    digest = hashlib.sha1(stable_source.encode("utf-8")).hexdigest()[:12]
-    readable = sender_email or sender_domain or "unknown"
-    readable = re.sub(r"[^a-zA-Z0-9_.@-]+", "-", readable).strip("-")[:48] or "unknown"
-    return f"{readable}:{digest}"
-
-
-def _risk_level(method: str) -> str:
-    if method == "one_click":
-        return "low"
-    if method in {"mailto", "website"}:
-        return "medium"
-    if method == "multiple":
-        return "review"
-    return "unknown"
-
-
-def _best_method(existing: str, incoming: str) -> str:
-    existing_priority = METHOD_PRIORITY.get(existing, METHOD_PRIORITY["unknown"])
-    incoming_priority = METHOD_PRIORITY.get(incoming, METHOD_PRIORITY["unknown"])
-    return incoming if incoming_priority < existing_priority else existing
-
-
-def _normalize_method(raw_method: Any) -> str:
-    method = str(raw_method or "unknown").strip().lower()
-    if method in {"one-click", "one click", "oneclick"}:
-        return "one_click"
-    return method or "unknown"
-
-
-def _build_evidence(unsubscribe: dict[str, Any], item_error: str) -> list[str]:
-    options = unsubscribe.get("options") if isinstance(unsubscribe.get("options"), dict) else {}
-    evidence: list[str] = []
-    if "one_click" in options:
-        evidence.append("One-click unsubscribe is available.")
-    if "mailto" in options:
-        evidence.append("A mailto unsubscribe request can be sent.")
-    website_option = options.get("website") if isinstance(options.get("website"), dict) else {}
-    if website_option.get("url"):
-        evidence.append("A header-based unsubscribe webpage is available.")
-    manual_links = website_option.get("manual_links")
-    if isinstance(manual_links, list) and manual_links:
-        evidence.append("Manual unsubscribe links were found in the email content.")
-    if item_error:
-        evidence.append(f"Tool warning: {item_error}")
-    if not evidence:
-        evidence.append("No actionable unsubscribe option was found.")
-    return evidence
-
-
-def _merge_candidate(candidates: dict[str, dict[str, Any]], candidate: dict[str, Any]) -> None:
-    key = candidate["candidate_id"]
-    existing = candidates.get(key)
-    if existing is None:
-        candidates[key] = candidate
-        return
-
-    existing["recent_count"] += 1
-    for subject in candidate.get("subjects", []):
-        if subject and subject not in existing["subjects"] and len(existing["subjects"]) < 5:
-            existing["subjects"].append(subject)
-    for email_id in candidate.get("sample_email_ids", []):
-        if email_id and email_id not in existing["sample_email_ids"] and len(existing["sample_email_ids"]) < 5:
-            existing["sample_email_ids"].append(email_id)
-
-    chosen_method = _best_method(existing.get("method", "unknown"), candidate.get("method", "unknown"))
-    if chosen_method != existing.get("method"):
-        existing["method"] = chosen_method
-        existing["risk_level"] = _risk_level(chosen_method)
-        existing["representative_email_id"] = candidate["representative_email_id"]
-        existing["unsubscribe"] = candidate["unsubscribe"]
-        existing["evidence"] = candidate["evidence"]
+SUCCESSFUL_HIDE_STATUSES = {"confirmed", "request_accepted", "request_submitted", "request_sent"}
 
 
 def _normalize_requested_method(raw_method: Any) -> str:
-    method = _normalize_method(raw_method or "auto")
+    method = normalize_method(raw_method or "auto")
     if method not in ALLOWED_METHODS:
         return "auto"
     return method
+
+
+def _normalize_string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        raw_values = value
+    elif value in {None, ""}:
+        raw_values = []
+    else:
+        raw_values = [value]
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw_item in raw_values:
+        item = str(raw_item or "").strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        normalized.append(item)
+    return normalized
+
+
+def _state_record_to_candidate(record: dict[str, Any]) -> dict[str, Any]:
+    representative_email_id = str(record.get("representative_email_id") or "").strip()
+    sample_email_ids = list(record.get("sample_email_ids") or [])
+    if representative_email_id and representative_email_id not in sample_email_ids:
+        sample_email_ids = [representative_email_id, *sample_email_ids][:5]
+
+    return {
+        "candidate_id": str(record.get("candidate_id") or "").strip(),
+        "sender": str(record.get("sender") or "").strip(),
+        "sender_email": str(record.get("sender_email") or "").strip(),
+        "sender_domain": str(record.get("sender_domain") or "").strip(),
+        "representative_email_id": representative_email_id,
+        "sample_email_ids": sample_email_ids,
+        "recent_count": int(record.get("recent_count") or 1),
+        "subjects": list(record.get("subjects") or []),
+        "method": normalize_method(record.get("method")),
+        "risk_level": risk_level_for_method(normalize_method(record.get("method"))),
+        "status": str(record.get("status") or "").strip(),
+    }
+
+
+def _merge_current_candidates(
+    read_result_candidates: list[dict[str, Any]],
+    visible_state_candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for candidate in visible_state_candidates:
+        candidate_id = str(candidate.get("candidate_id") or "").strip()
+        if candidate_id:
+            merged[candidate_id] = candidate
+    for candidate in read_result_candidates:
+        candidate_id = str(candidate.get("candidate_id") or "").strip()
+        if candidate_id:
+            merged[candidate_id] = candidate
+    return sort_candidates(list(merged.values()))
 
 
 def _available_methods(options: dict[str, Any]) -> list[str]:
@@ -247,25 +132,57 @@ def _first_manual_link(link_payload: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
-def _pending_result(candidate: dict[str, Any], requested_method: str) -> dict[str, Any]:
-    unsubscribe = candidate.get("unsubscribe") if isinstance(candidate.get("unsubscribe"), dict) else {}
-    options = unsubscribe.get("options") if isinstance(unsubscribe.get("options"), dict) else {}
-    classified_method = _normalize_method(unsubscribe.get("method"))
-    available_methods = _available_methods(options)
+def _hydrate_candidates_for_execution(
+    candidates: list[dict[str, Any]],
+    *,
+    used_tools: dict[str, Callable[..., Any]],
+) -> dict[str, Any]:
+    email_ids: list[str] = []
+    seen_email_ids: set[str] = set()
+    for candidate in candidates:
+        email_id = str(candidate.get("representative_email_id") or "").strip()
+        if not email_id or email_id in seen_email_ids:
+            continue
+        seen_email_ids.add(email_id)
+        email_ids.append(email_id)
+
+    unsubscribe_kwargs = {"email_ids": email_ids}
+    if email_ids:
+        _, unsubscribe_kwargs, unsubscribe_text = call_tool(
+            "get_unsubscribe_info",
+            used_tools["get_unsubscribe_info"],
+            unsubscribe_kwargs,
+            log_prefix="[skill:unsubscribe_execute]",
+        )
+        unsubscribe_payload = loads_mapping(unsubscribe_text)
+    else:
+        unsubscribe_payload = {"items": [], "summary": {"requested_count": 0, "analyzed_count": 0, "error_count": 0}, "error": ""}
+        unsubscribe_text = json.dumps(unsubscribe_payload, ensure_ascii=False)
+
+    unsubscribe_items = {
+        str(item.get("email_id") or "").strip(): item
+        for item in unsubscribe_payload.get("items", [])
+        if isinstance(item, dict) and str(item.get("email_id") or "").strip()
+    }
+
+    hydrated_candidates: list[dict[str, Any]] = []
+    for candidate in candidates:
+        hydrated = dict(candidate)
+        email_id = str(candidate.get("representative_email_id") or "").strip()
+        item = unsubscribe_items.get(email_id, {})
+        unsubscribe = item.get("unsubscribe") if isinstance(item.get("unsubscribe"), dict) else {}
+        item_error = str(item.get("error") or "").strip()
+        method = normalize_method(unsubscribe.get("method") or candidate.get("method"))
+        hydrated["unsubscribe"] = unsubscribe
+        hydrated["method"] = method
+        hydrated["risk_level"] = risk_level_for_method(method)
+        hydrated["evidence"] = build_evidence(unsubscribe, item_error)
+        hydrated_candidates.append(hydrated)
+
     return {
-        "candidate_id": candidate.get("candidate_id"),
-        "sender": candidate.get("sender"),
-        "sender_email": candidate.get("sender_email"),
-        "sender_domain": candidate.get("sender_domain"),
-        "representative_email_id": candidate.get("representative_email_id"),
-        "sample_email_ids": candidate.get("sample_email_ids"),
-        "recent_count": candidate.get("recent_count"),
-        "subjects": candidate.get("subjects"),
-        "requested_method": requested_method,
-        "classified_method": classified_method,
-        "available_methods": available_methods,
-        "status": "needs_confirmation",
-        "evidence": "No unsubscribe action was executed because confirmed=false.",
+        "candidates": hydrated_candidates,
+        "unsubscribe_kwargs": unsubscribe_kwargs,
+        "unsubscribe_text": unsubscribe_text,
     }
 
 
@@ -277,7 +194,7 @@ def _execute_candidate(
 ) -> dict[str, Any]:
     unsubscribe = candidate.get("unsubscribe") if isinstance(candidate.get("unsubscribe"), dict) else {}
     options = unsubscribe.get("options") if isinstance(unsubscribe.get("options"), dict) else {}
-    classified_method = _normalize_method(unsubscribe.get("method"))
+    classified_method = normalize_method(unsubscribe.get("method"))
     available_methods = _available_methods(options)
     effective_method = _resolve_effective_method(requested_method, classified_method, options)
 
@@ -287,9 +204,6 @@ def _execute_candidate(
         "sender_email": candidate.get("sender_email"),
         "sender_domain": candidate.get("sender_domain"),
         "representative_email_id": candidate.get("representative_email_id"),
-        "sample_email_ids": candidate.get("sample_email_ids"),
-        "recent_count": candidate.get("recent_count"),
-        "subjects": candidate.get("subjects"),
         "requested_method": requested_method,
         "classified_method": classified_method,
         "available_methods": available_methods,
@@ -320,12 +234,13 @@ def _execute_candidate(
         if not one_click_url:
             result["evidence"] = "No one-click URL was available after reading unsubscribe metadata."
         else:
-            tool_name, tool_kwargs, execution_text = _call_tool(
+            tool_name, tool_kwargs, execution_text = call_tool(
                 "post_one_click_unsubscribe",
                 used_tools["post_one_click_unsubscribe"],
                 {"url": one_click_url},
+                log_prefix="[skill:unsubscribe_execute]",
             )
-            execution_payload = _loads_mapping(execution_text)
+            execution_payload = loads_mapping(execution_text)
             result["status"] = str(execution_payload.get("status") or "uncertain")
             result["sender_unsubscribe_status"] = str(
                 execution_payload.get("sender_unsubscribe_status")
@@ -349,7 +264,7 @@ def _execute_candidate(
             result["evidence"] = "No mailto send payload was available after reading unsubscribe metadata."
         else:
             body = str(send_payload.get("body") or "").strip() or "unsubscribe"
-            tool_name, tool_kwargs, send_text = _call_tool(
+            tool_name, tool_kwargs, send_text = call_tool(
                 "send",
                 used_tools["send"],
                 {
@@ -357,6 +272,7 @@ def _execute_candidate(
                     "subject": str(send_payload.get("subject") or "unsubscribe").strip() or "unsubscribe",
                     "body": body,
                 },
+                log_prefix="[skill:unsubscribe_execute]",
             )
             result["status"] = "request_sent"
             result["sender_unsubscribe_status"] = "request_sent"
@@ -398,11 +314,7 @@ def _execute_candidate(
     else:
         result["evidence"] = f"Unsupported or unknown unsubscribe method: {effective_method}."
 
-    manual_unsubscribe = result.get("manual_unsubscribe")
-    if (
-        not manual_unsubscribe
-        and result.get("status") in MANUAL_LINK_FALLBACK_STATUSES
-    ):
+    if result.get("status") in MANUAL_LINK_FALLBACK_STATUSES and not result.get("manual_unsubscribe"):
         website_option = options.get("website") if isinstance(options.get("website"), dict) else {}
         manual_unsubscribe = _first_manual_link(website_option)
         if manual_unsubscribe:
@@ -419,173 +331,331 @@ def _execute_candidate(
     return result
 
 
-def _status_counts(results: list[dict[str, Any]]) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for item in results:
-        status = str(item.get("status") or "unknown").strip() or "unknown"
-        counts[status] = counts.get(status, 0) + 1
-    return counts
+def _candidate_summary(candidate: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "candidate_id": candidate.get("candidate_id"),
+        "sender": candidate.get("sender"),
+        "sender_email": candidate.get("sender_email"),
+        "sender_domain": candidate.get("sender_domain"),
+        "representative_email_id": candidate.get("representative_email_id"),
+        "method": candidate.get("method"),
+        "subjects": candidate.get("subjects"),
+    }
 
 
-def execute_skill(*, arguments, used_tools, skill_spec):
-    days = _clamp_int(arguments.get("days", DEFAULT_DAYS), default=DEFAULT_DAYS, minimum=1, maximum=MAX_DAYS)
-    max_results = _clamp_int(
+def execute_skill(
+    *,
+    arguments,
+    used_tools,
+    skill_spec,
+    read_results=None,
+    skill_runtime=None,
+    **_kwargs,
+):
+    days = clamp_int(arguments.get("days", DEFAULT_DAYS), default=DEFAULT_DAYS, minimum=1, maximum=MAX_DAYS)
+    max_results = clamp_int(
         arguments.get("max_results", DEFAULT_MAX_RESULTS),
         default=DEFAULT_MAX_RESULTS,
         minimum=1,
         maximum=MAX_RESULTS_CAP,
     )
     requested_method = _normalize_requested_method(arguments.get("method", "auto"))
-    confirmed = bool(arguments.get("confirmed", False))
-    search_query = _build_search_query(days)
+    target_queries = _normalize_string_list(arguments.get("target_queries"))
+    candidate_ids = _normalize_string_list(arguments.get("candidate_ids"))
+
+    if not target_queries and not candidate_ids:
+        return {
+            "completed": False,
+            "reason": "unsubscribe_execute requires at least one target query or one candidate id.",
+        }
 
     print(
-        f"[skill:unsubscribe_execute] start days={days} max_results={max_results} method={requested_method} confirmed={confirmed}",
+        "[skill:unsubscribe_execute] start "
+        f"days={days} max_results={max_results} method={requested_method} "
+        f"target_queries={target_queries} candidate_ids={candidate_ids}",
         flush=True,
     )
 
-    _, search_kwargs, search_text = _call_tool(
-        "search_emails",
-        used_tools["search_emails"],
-        {"query": search_query, "max_results": max_results},
+    state_records = load_unsubscribe_state_records(skill_runtime=skill_runtime)
+    state_index = index_unsubscribe_state_records(state_records)
+    visible_state_candidates = sort_candidates(
+        [_state_record_to_candidate(record) for record in visible_unsubscribe_state_records(state_records)]
     )
-    search_entries = _extract_search_entries(search_text)
-    email_ids = [entry["email_id"] for entry in search_entries if entry.get("email_id")]
-    if not email_ids:
-        email_ids = _extract_email_ids(search_text)
-        search_entries = [
-            {"from": "(unknown sender)", "subject": "(no subject)", "email_id": email_id}
-            for email_id in email_ids
-        ]
-
-    _, unsubscribe_kwargs, unsubscribe_text = _call_tool(
-        "get_unsubscribe_info",
-        used_tools["get_unsubscribe_info"],
-        {"email_ids": email_ids},
-    )
-    unsubscribe_payload = _loads_mapping(unsubscribe_text)
-    unsubscribe_items = {
-        str(item.get("email_id") or "").strip(): item
-        for item in unsubscribe_payload.get("items", [])
-        if isinstance(item, dict) and str(item.get("email_id") or "").strip()
+    read_result_candidates = extract_candidate_lists_from_read_results(read_results)
+    current_visible_candidates = _merge_current_candidates(read_result_candidates, visible_state_candidates)
+    current_visible_by_id = {
+        str(candidate.get("candidate_id") or "").strip(): candidate for candidate in current_visible_candidates
     }
 
-    candidates: dict[str, dict[str, Any]] = {}
-    inspected_count = 0
-    unsubscribe_summary = unsubscribe_payload.get("summary") if isinstance(unsubscribe_payload.get("summary"), dict) else {}
-    error_count = int(unsubscribe_summary.get("error_count", 0) or 0)
+    target_requests: list[dict[str, Any]] = []
+    for candidate_id in candidate_ids:
+        target_requests.append(
+            {
+                "request_type": "candidate_id",
+                "target_query": "",
+                "candidate_id": candidate_id,
+            }
+        )
+    for target_query in target_queries:
+        target_requests.append(
+            {
+                "request_type": "query",
+                "target_query": target_query,
+                "candidate_id": "",
+            }
+        )
 
-    for entry in search_entries:
-        email_id = str(entry.get("email_id") or "").strip()
-        item = unsubscribe_items.get(email_id, {})
-        unsubscribe = item.get("unsubscribe") if isinstance(item.get("unsubscribe"), dict) else {}
-        item_error = str(item.get("error") or "").strip()
+    fallback_discovery_summaries: list[dict[str, Any]] = []
 
-        raw_from = str(entry.get("from") or "").strip()
-        sender, sender_email, sender_domain = _sender_parts(raw_from)
-        subject = str(entry.get("subject") or "").strip() or "(no subject)"
-        method = _normalize_method(unsubscribe.get("method"))
-        evidence = _build_evidence(unsubscribe, item_error)
+    for request in target_requests:
+        if request["request_type"] == "candidate_id":
+            candidate = current_visible_by_id.get(request["candidate_id"]) or state_index.get(request["candidate_id"])
+            if candidate is None:
+                request["status"] = "not_found"
+                request["reason"] = "The requested candidate_id was not present in the current subscription list or the local state."
+            else:
+                request["resolved_candidate"] = (
+                    candidate if isinstance(candidate, dict) and "representative_email_id" in candidate else _state_record_to_candidate(candidate)
+                )
+                request["status"] = "resolved"
+                request["selection_source"] = "candidate_id"
+            continue
 
-        candidate = {
-            "candidate_id": _candidate_id(sender_email=sender_email, sender_domain=sender_domain),
-            "sender": sender,
-            "sender_email": sender_email,
-            "sender_domain": sender_domain,
-            "representative_email_id": email_id,
-            "sample_email_ids": [email_id],
-            "recent_count": 1,
-            "subjects": [subject],
-            "method": method,
-            "risk_level": _risk_level(method),
-            "unsubscribe": unsubscribe,
-            "status": "candidate",
-            "evidence": evidence,
-            "raw_tool_calls": {
-                "get_unsubscribe_info": unsubscribe_kwargs,
-            },
+        target_query = request["target_query"]
+        fallback_query = build_targeted_search_query(target_query, days)
+        fallback_result = collect_candidates(
+            search_query=fallback_query,
+            max_results=max_results,
+            used_tools=used_tools,
+            log_prefix="[skill:unsubscribe_execute]",
+        )
+        merge_discovered_candidates(fallback_result["ordered_candidates"], skill_runtime=skill_runtime)
+        fallback_matches = match_candidates_by_target_query(fallback_result["ordered_candidates"], target_query)
+
+        fallback_summary = {
+            "target_query": target_query,
+            "search_query": fallback_query,
+            "matched_email_id_count": len(fallback_result["matched_email_ids"]),
+            "candidate_count": len(fallback_result["ordered_candidates"]),
+            "resolved": False,
         }
-        _merge_candidate(candidates, candidate)
-        inspected_count += 1
 
-    ordered_candidates = sorted(
-        candidates.values(),
-        key=lambda item: (
-            METHOD_PRIORITY.get(str(item.get("method") or "unknown"), METHOD_PRIORITY["unknown"]),
-            -int(item.get("recent_count") or 0),
-            str(item.get("sender_email") or item.get("sender") or ""),
-        ),
+        if len(fallback_matches) == 1:
+            request["resolved_candidate"] = fallback_matches[0]
+            request["status"] = "resolved"
+            request["selection_source"] = "targeted_search_match"
+            fallback_summary["resolved"] = True
+            fallback_summary["selection_source"] = "targeted_search_match"
+        elif fallback_matches:
+            request["status"] = "not_found"
+            request["reason"] = "The targeted mailbox search found multiple unsubscribe candidates for this request."
+            fallback_summary["selection_source"] = "ambiguous_targeted_search_match"
+        else:
+            request["status"] = "not_found"
+            request["reason"] = (
+                "The target could not be matched to a discovered unsubscribe candidate "
+                "after the targeted mailbox search."
+            )
+            fallback_summary["selection_source"] = "no_targeted_match"
+
+        fallback_discovery_summaries.append(fallback_summary)
+
+    state_records = load_unsubscribe_state_records(skill_runtime=skill_runtime)
+    state_index = index_unsubscribe_state_records(state_records)
+
+    candidates_to_execute: dict[str, dict[str, Any]] = {}
+    already_unsubscribed: list[dict[str, Any]] = []
+    unresolved_targets: list[dict[str, Any]] = []
+
+    for request in target_requests:
+        candidate = request.get("resolved_candidate")
+        if not isinstance(candidate, dict):
+            unresolved_targets.append(
+                {
+                    "target_query": request.get("target_query") or request.get("candidate_id") or "(unknown target)",
+                    "status": request.get("status") or "not_found",
+                    "reason": request.get("reason") or "The target could not be resolved.",
+                }
+            )
+            continue
+
+        candidate_id = str(candidate.get("candidate_id") or "").strip()
+        state_record = state_index.get(candidate_id)
+        if isinstance(state_record, dict) and state_record.get("status") == HIDDEN_STATUS:
+            already_unsubscribed.append(
+                {
+                    "target_query": request.get("target_query") or "",
+                    "selection_source": request.get("selection_source") or "local_state",
+                    **_candidate_summary(_state_record_to_candidate(state_record)),
+                    "local_status": HIDDEN_STATUS,
+                }
+            )
+            continue
+
+        if candidate_id:
+            candidates_to_execute[candidate_id] = candidate
+
+    hydrated_result = _hydrate_candidates_for_execution(
+        list(candidates_to_execute.values()),
+        used_tools=used_tools,
+    )
+    execution_results_by_candidate_id: dict[str, dict[str, Any]] = {}
+    successful_candidates: list[dict[str, Any]] = []
+
+    for hydrated_candidate in hydrated_result["candidates"]:
+        execution_result = _execute_candidate(
+            hydrated_candidate,
+            requested_method=requested_method,
+            used_tools=used_tools,
+        )
+        candidate_id = str(hydrated_candidate.get("candidate_id") or "").strip()
+        if candidate_id:
+            execution_results_by_candidate_id[candidate_id] = execution_result
+        if execution_result.get("status") in SUCCESSFUL_HIDE_STATUSES:
+            successful_candidates.append(hydrated_candidate)
+
+    if successful_candidates:
+        mark_candidates_hidden_after_unsubscribe(successful_candidates, skill_runtime=skill_runtime)
+
+    final_state_records = load_unsubscribe_state_records(skill_runtime=skill_runtime)
+    visible_after_execution = sort_candidates(
+        [_state_record_to_candidate(record) for record in visible_unsubscribe_state_records(final_state_records)]
     )
 
-    if confirmed:
-        execution_results = [
-            _execute_candidate(candidate, requested_method=requested_method, used_tools=used_tools)
-            for candidate in ordered_candidates
-        ]
-    else:
-        execution_results = [
-            _pending_result(candidate, requested_method)
-            for candidate in ordered_candidates
-        ]
+    newly_unsubscribed: list[dict[str, Any]] = []
+    manual_action_required: list[dict[str, Any]] = []
+    failed_results: list[dict[str, Any]] = []
+    target_results: list[dict[str, Any]] = []
 
-    status_counts = _status_counts(execution_results)
-    executed_candidate_count = sum(
-        1 for item in execution_results if str(item.get("status") or "") != "needs_confirmation"
-    )
+    for request in target_requests:
+        target_label = request.get("target_query") or request.get("candidate_id") or "(unknown target)"
+        candidate = request.get("resolved_candidate")
+        if not isinstance(candidate, dict):
+            target_results.append(
+                {
+                    "target_query": target_label,
+                    "status": "not_found",
+                    "reason": request.get("reason") or "The target could not be resolved.",
+                }
+            )
+            continue
+
+        candidate_id = str(candidate.get("candidate_id") or "").strip()
+        state_record = state_index.get(candidate_id)
+        if isinstance(state_record, dict) and state_record.get("status") == HIDDEN_STATUS:
+            target_results.append(
+                {
+                    "target_query": target_label,
+                    "status": "already_unsubscribed",
+                    "selection_source": request.get("selection_source") or "local_state",
+                    **_candidate_summary(_state_record_to_candidate(state_record)),
+                }
+            )
+            continue
+
+        execution_result = execution_results_by_candidate_id.get(candidate_id)
+        if execution_result is None:
+            target_results.append(
+                {
+                    "target_query": target_label,
+                    "status": "failed",
+                    "selection_source": request.get("selection_source") or "resolved_candidate",
+                    **_candidate_summary(candidate),
+                    "reason": "The target candidate was resolved but no execution result was produced.",
+                }
+            )
+            failed_results.append(target_results[-1])
+            continue
+
+        target_result = {
+            "target_query": target_label,
+            "selection_source": request.get("selection_source") or "resolved_candidate",
+            **_candidate_summary(candidate),
+            "execution_status": execution_result.get("status"),
+            "requested_method": execution_result.get("requested_method"),
+            "effective_method": execution_result.get("effective_method"),
+            "evidence": execution_result.get("evidence"),
+        }
+
+        if execution_result.get("status") in SUCCESSFUL_HIDE_STATUSES:
+            target_result["status"] = "newly_unsubscribed"
+            newly_unsubscribed.append(target_result)
+        elif execution_result.get("status") in {"manual_link_available", "manual_required"}:
+            target_result["status"] = "manual_action_required"
+            if execution_result.get("manual_unsubscribe"):
+                target_result["manual_unsubscribe"] = execution_result["manual_unsubscribe"]
+            manual_action_required.append(target_result)
+        else:
+            target_result["status"] = "failed"
+            failed_results.append(target_result)
+
+        target_results.append(target_result)
 
     lines = [
         "[UNSUBSCRIBE_EXECUTE_BUNDLE]",
         f"skill_name: {skill_spec.get('name', 'unsubscribe_execute')}",
+        f"requested_method: {requested_method}",
         f"days: {days}",
         f"max_results: {max_results}",
-        f"requested_method: {requested_method}",
-        f"confirmed: {str(confirmed).lower()}",
-        f"search_query: {search_query}",
-        f"matched_email_id_count: {len(email_ids)}",
-        f"inspected_email_count: {inspected_count}",
-        f"candidate_count: {len(ordered_candidates)}",
-        f"metadata_error_count: {error_count}",
-        f"executed_candidate_count: {executed_candidate_count}",
-        f"status_counts: {json.dumps(status_counts, ensure_ascii=False, sort_keys=True)}",
+        f"target_query_count: {len(target_queries)}",
+        f"candidate_id_count: {len(candidate_ids)}",
+        f"newly_unsubscribed_count: {len(newly_unsubscribed)}",
+        f"already_unsubscribed_count: {len(already_unsubscribed)}",
+        f"manual_action_required_count: {len(manual_action_required)}",
+        f"failed_count: {len(failed_results)}",
+        f"not_found_count: {len(unresolved_targets)}",
         "notes:",
-        "- This workflow reuses the same discovery pipeline as unsubscribe_discovery before any execution.",
-        "- It searches recent subscription-like emails, reads execution-ready unsubscribe metadata, groups results into candidates, then executes per candidate.",
-        "- one_click executes the sender endpoint POST and reports the returned HTTP result.",
-        "- mailto sends the exact unsubscribe payload returned by get_unsubscribe_info.",
+        "- This workflow supports one or more unsubscribe targets.",
+        "- It first tries to resolve targets from the current visible subscription list and local state.",
+        "- If a target is not in the current list, it runs a targeted live mailbox search, re-inspects unsubscribe metadata, and merges any discovered candidates into the local state.",
+        "- Successful one_click or mailto unsubscribe actions are marked hidden locally so later discovery results no longer show them.",
         "- Website unsubscribe automation is not implemented in this version.",
-        "- Gmail Subscriptions UI is not updated by this agent; it may still show the sender after execution.",
-        "- If status is manual_link_available, the user must open the extracted link manually; the agent did not visit the page.",
-        "- If confirmed=false, no unsubscribe action was executed.",
         "",
-        "[SEARCH_EMAILS]",
-        "tool: search_emails",
-        f"arguments: {search_kwargs}",
-        search_text,
+        "[CURRENT_VISIBLE_SUBSCRIPTIONS_JSON]",
+        json.dumps(current_visible_candidates, ensure_ascii=False, indent=2, sort_keys=True),
         "",
-        "[GET_UNSUBSCRIBE_INFO]",
-        "tool: get_unsubscribe_info",
-        f"arguments: {unsubscribe_kwargs}",
-        unsubscribe_text,
+        "[EXECUTION_GET_UNSUBSCRIBE_INFO]",
+        f"arguments: {hydrated_result['unsubscribe_kwargs']}",
+        hydrated_result["unsubscribe_text"],
         "",
-        "[CANDIDATES_JSON]",
-        json.dumps(ordered_candidates, ensure_ascii=False, indent=2, sort_keys=True),
+        "[FALLBACK_DISCOVERY_JSON]",
+        json.dumps(fallback_discovery_summaries, ensure_ascii=False, indent=2, sort_keys=True),
         "",
-        "[EXECUTION_RESULTS_JSON]",
-        json.dumps(execution_results, ensure_ascii=False, indent=2, sort_keys=True),
+        "[TARGET_RESULTS_JSON]",
+        json.dumps(target_results, ensure_ascii=False, indent=2, sort_keys=True),
+        "",
+        "[NEWLY_UNSUBSCRIBED_JSON]",
+        json.dumps(newly_unsubscribed, ensure_ascii=False, indent=2, sort_keys=True),
+        "",
+        "[ALREADY_UNSUBSCRIBED_JSON]",
+        json.dumps(already_unsubscribed, ensure_ascii=False, indent=2, sort_keys=True),
+        "",
+        "[MANUAL_ACTION_REQUIRED_JSON]",
+        json.dumps(manual_action_required, ensure_ascii=False, indent=2, sort_keys=True),
+        "",
+        "[FAILED_JSON]",
+        json.dumps(failed_results, ensure_ascii=False, indent=2, sort_keys=True),
+        "",
+        "[NOT_FOUND_JSON]",
+        json.dumps(unresolved_targets, ensure_ascii=False, indent=2, sort_keys=True),
+        "",
+        "[VISIBLE_SUBSCRIPTIONS_AFTER_EXECUTION_JSON]",
+        json.dumps(visible_after_execution, ensure_ascii=False, indent=2, sort_keys=True),
     ]
 
     print(
-        f"[skill:unsubscribe_execute] completed candidates={len(ordered_candidates)} executed={executed_candidate_count}",
+        "[skill:unsubscribe_execute] completed "
+        f"newly_unsubscribed={len(newly_unsubscribed)} already_unsubscribed={len(already_unsubscribed)} "
+        f"manual_required={len(manual_action_required)} failed={len(failed_results)} not_found={len(unresolved_targets)}",
         flush=True,
     )
 
-    reason = (
-        "Collected unsubscribe discovery metadata but did not execute because confirmed=false."
-        if not confirmed
-        else f"Executed unsubscribe workflow across {len(ordered_candidates)} discovered candidate(s)."
-    )
     return {
         "completed": True,
         "response": "\n".join(lines).strip(),
-        "reason": reason,
+        "reason": (
+            "Resolved unsubscribe targets against the current subscription list and local state, "
+            "executed actionable targets, updated the local hidden overlay for successful unsubscribes, "
+            "and returned categorized execution results."
+        ),
     }

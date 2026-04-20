@@ -5,6 +5,7 @@ import threading
 from pathlib import Path
 
 from intent_layer import PythonSkillExecutor, SkillInputFieldSpec, SkillSpec, build_tool_function_map
+from unsubscribe_workflow import candidate_id_for_sender, extract_section_text
 
 
 class UnsubscribeExecuteToolBox:
@@ -20,6 +21,21 @@ class UnsubscribeExecuteToolBox:
 
     def search_emails(self, query: str, max_results: int = 10) -> str:
         self._record("search_emails", query=query, max_results=max_results)
+        normalized_query = str(query)
+        if "Qudos Bank Arena" in normalized_query:
+            return (
+                "Found 1 email(s):\n\n"
+                "1. From: Qudos Bank Arena <news@qudosbankarena.com.au>\n"
+                "   Subject: Qudos Bank Arena events\n"
+                "   ID: unsub-004\n"
+            )
+        if "Mismatch Brand" in normalized_query:
+            return (
+                "Found 1 email(s):\n\n"
+                "1. From: Deals <deals@example.com>\n"
+                "   Subject: Weekly deals\n"
+                "   ID: unsub-001\n"
+            )
         return (
             "Found 3 email(s):\n\n"
             "1. From: Deals <deals@example.com>\n"
@@ -44,16 +60,7 @@ class UnsubscribeExecuteToolBox:
                         "one_click": {
                             "url": "https://example.com/one-click?id=123",
                             "request_payload": {"url": "https://example.com/one-click?id=123"},
-                        },
-                        "website": {
-                            "manual_links": [
-                                {
-                                    "url": "https://example.com/manual-unsubscribe?token=abc",
-                                    "label": "Click here to unsubscribe",
-                                    "source": "email_body",
-                                }
-                            ]
-                        },
+                        }
                     },
                 },
                 "error": "",
@@ -89,6 +96,19 @@ class UnsubscribeExecuteToolBox:
                                     "source": "list_unsubscribe_header",
                                 }
                             ],
+                        }
+                    },
+                },
+                "error": "",
+            },
+            "unsub-004": {
+                "email_id": "unsub-004",
+                "unsubscribe": {
+                    "method": "one_click",
+                    "options": {
+                        "one_click": {
+                            "url": "https://qudos.example.com/unsubscribe?id=456",
+                            "request_payload": {"url": "https://qudos.example.com/unsubscribe?id=456"},
                         }
                     },
                 },
@@ -131,18 +151,11 @@ class UnsubscribeExecuteToolBox:
         return f"sent to {to} subject={subject}"
 
 
-def _executor_for(toolbox: UnsubscribeExecuteToolBox) -> PythonSkillExecutor:
-    return PythonSkillExecutor(
-        skills_directory=Path(__file__).resolve().parent.parent / "skills",
-        tool_function_map=build_tool_function_map([toolbox]),
-    )
-
-
 def _spec() -> SkillSpec:
     return SkillSpec(
         name="unsubscribe_execute",
         description="Execute unsubscribe.",
-        scope="Confirmed unsubscribe only.",
+        scope="Multi-target unsubscribe.",
         used_tools=(
             "search_emails",
             "get_unsubscribe_info",
@@ -151,6 +164,20 @@ def _spec() -> SkillSpec:
         ),
         output="execution result",
         input_schema=(
+            SkillInputFieldSpec(
+                name="target_queries",
+                field_type="list",
+                required=True,
+                description="Targets to unsubscribe.",
+            ),
+            SkillInputFieldSpec(
+                name="candidate_ids",
+                field_type="list",
+                required=False,
+                description="Optional candidate ids.",
+                has_default=True,
+                default=[],
+            ),
             SkillInputFieldSpec(
                 name="days",
                 field_type="int",
@@ -175,103 +202,167 @@ def _spec() -> SkillSpec:
                 has_default=True,
                 default="auto",
             ),
-            SkillInputFieldSpec(
-                name="confirmed",
-                field_type="bool",
-                required=False,
-                description="Explicit confirmation.",
-                has_default=True,
-                default=False,
-            ),
         ),
     )
 
 
-def test_unsubscribe_execute_requires_confirmation_before_side_effects():
-    toolbox = UnsubscribeExecuteToolBox()
-    result = _executor_for(toolbox).run(
-        _spec(),
-        skill_arguments={"days": 30, "max_results": 20, "confirmed": False},
-        current_message="Unsubscribe from these newsletters.",
-        intent_decision=type("Intent", (), {"intent": "Unsubscribe from recent subscription emails."})(),
-        recent_context=[],
+def _executor_for(toolbox: UnsubscribeExecuteToolBox, state_path: Path) -> PythonSkillExecutor:
+    return PythonSkillExecutor(
+        skills_directory=Path(__file__).resolve().parent.parent / "skills",
+        tool_function_map=build_tool_function_map([toolbox]),
+        skill_runtime={"unsubscribe_state_path": str(state_path)},
     )
 
-    assert result.completed is True
-    assert result.response is not None
-    assert "[UNSUBSCRIBE_EXECUTE_BUNDLE]" in result.response
-    assert '"needs_confirmation": 3' in result.response
-    assert [name for name, _ in toolbox.calls] == ["search_emails", "get_unsubscribe_info"]
+
+def _write_state(path: Path, items: list[dict[str, object]]) -> None:
+    path.write_text(json.dumps({"version": 1, "items": items}, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def test_unsubscribe_execute_runs_batch_execution_after_confirmation():
+def _read_section_list(response: str, section_name: str) -> list[dict[str, object]]:
+    text = extract_section_text(response, section_name)
+    return json.loads(text) if text else []
+
+
+def test_unsubscribe_execute_marks_new_successful_target_hidden(tmp_path):
     toolbox = UnsubscribeExecuteToolBox()
-    result = _executor_for(toolbox).run(
-        _spec(),
-        skill_arguments={"days": 30, "max_results": 20, "confirmed": True},
-        current_message="Yes, unsubscribe them.",
-        intent_decision=type("Intent", (), {"intent": "Confirm batch unsubscribe."})(),
-        recent_context=[],
+    state_path = tmp_path / "UNSUBSCRIBE_STATE.json"
+    _write_state(
+        state_path,
+        [
+            {
+                "candidate_id": candidate_id_for_sender(sender_email="product@vendor.test", sender_domain="vendor.test"),
+                "sender": "Product <product@vendor.test>",
+                "sender_email": "product@vendor.test",
+                "sender_domain": "vendor.test",
+                "representative_email_id": "unsub-002",
+                "status": "active",
+                "updated_at": "2026-04-20T00:00:00+00:00",
+                "method": "mailto",
+            }
+        ],
     )
 
-    assert result.completed is True
-    assert result.response is not None
-    assert '"status": "confirmed"' in result.response
-    assert '"status": "request_sent"' in result.response
-    assert '"status": "manual_link_available"' in result.response
-    assert ("post_one_click_unsubscribe", {"url": "https://example.com/one-click?id=123"}) in toolbox.calls
-    assert ("send", {"to": "unsubscribe@example.com", "subject": "unsubscribe", "body": "unsubscribe"}) in toolbox.calls
-
-
-def test_unsubscribe_execute_preserves_one_click_request_accepted_status():
-    toolbox = UnsubscribeExecuteToolBox()
-    toolbox.one_click_status = "request_accepted"
-    result = _executor_for(toolbox).run(
+    result = _executor_for(toolbox, state_path).run(
         _spec(),
-        skill_arguments={"days": 30, "max_results": 20, "confirmed": True},
-        current_message="Yes, unsubscribe them.",
-        intent_decision=type("Intent", (), {"intent": "Confirm batch unsubscribe."})(),
+        skill_arguments={"target_queries": ["Product"], "candidate_ids": [], "days": 30, "max_results": 20},
+        current_message="Unsubscribe from Product.",
+        intent_decision=type("Intent", (), {"intent": "Unsubscribe from Product."})(),
         recent_context=[],
-    )
-
-    assert result.completed is True
-    assert result.response is not None
-    assert '"request_accepted": 1' in result.response
-    assert '"sender_unsubscribe_status": "request_accepted"' in result.response
-
-
-def test_unsubscribe_execute_returns_manual_link_when_one_click_fails():
-    toolbox = UnsubscribeExecuteToolBox()
-    toolbox.one_click_status = "failed"
-    toolbox.one_click_evidence = "HTTP 403 response received."
-    result = _executor_for(toolbox).run(
-        _spec(),
-        skill_arguments={"days": 30, "max_results": 20, "confirmed": True},
-        current_message="Yes, unsubscribe them.",
-        intent_decision=type("Intent", (), {"intent": "Confirm batch unsubscribe."})(),
-        recent_context=[],
-    )
-
-    assert result.completed is True
-    assert result.response is not None
-    assert '"manual_link_available": 2' in result.response
-    assert "https://example.com/manual-unsubscribe?token=abc" in result.response
-    assert "https://service.example.com/preferences" in result.response
-
-
-def test_unsubscribe_execute_requested_method_filters_candidates():
-    toolbox = UnsubscribeExecuteToolBox()
-    result = _executor_for(toolbox).run(
-        _spec(),
-        skill_arguments={"days": 30, "max_results": 20, "confirmed": True, "method": "mailto"},
-        current_message="Use mailto only.",
-        intent_decision=type("Intent", (), {"intent": "Confirm mailto-only unsubscribe."})(),
-        recent_context=[],
+        read_results=[],
     )
 
     assert result.completed is True
     assert result.response is not None
     assert ("send", {"to": "unsubscribe@example.com", "subject": "unsubscribe", "body": "unsubscribe"}) in toolbox.calls
+    search_calls = [call for call in toolbox.calls if call[0] == "search_emails"]
+    assert len(search_calls) == 1
+    assert "Product" in str(search_calls[0][1]["query"])
+
+    newly_unsubscribed = _read_section_list(result.response, "NEWLY_UNSUBSCRIBED_JSON")
+    assert len(newly_unsubscribed) == 1
+    assert newly_unsubscribed[0]["sender_email"] == "product@vendor.test"
+
+    stored_payload = json.loads(state_path.read_text(encoding="utf-8"))
+    statuses = {item["sender_email"]: item["status"] for item in stored_payload["items"]}
+    assert statuses["product@vendor.test"] == "hidden_locally_after_unsubscribe"
+
+
+def test_unsubscribe_execute_reports_already_hidden_without_reexecution(tmp_path):
+    toolbox = UnsubscribeExecuteToolBox()
+    state_path = tmp_path / "UNSUBSCRIBE_STATE.json"
+    _write_state(
+        state_path,
+        [
+            {
+                "candidate_id": candidate_id_for_sender(sender_email="news@qudosbankarena.com.au", sender_domain="qudosbankarena.com.au"),
+                "sender": "Qudos Bank Arena <news@qudosbankarena.com.au>",
+                "sender_email": "news@qudosbankarena.com.au",
+                "sender_domain": "qudosbankarena.com.au",
+                "representative_email_id": "unsub-004",
+                "status": "hidden_locally_after_unsubscribe",
+                "updated_at": "2026-04-20T00:00:00+00:00",
+                "method": "one_click",
+            }
+        ],
+    )
+
+    result = _executor_for(toolbox, state_path).run(
+        _spec(),
+        skill_arguments={"target_queries": ["Qudos Bank Arena"], "candidate_ids": [], "days": 30, "max_results": 20},
+        current_message="Unsubscribe from Qudos Bank Arena.",
+        intent_decision=type("Intent", (), {"intent": "Unsubscribe from Qudos Bank Arena."})(),
+        recent_context=[],
+        read_results=[],
+    )
+
+    assert result.completed is True
+    called_tool_names = [name for name, _ in toolbox.calls]
+    assert "post_one_click_unsubscribe" not in called_tool_names
+    assert "send" not in called_tool_names
+
+    already_unsubscribed = _read_section_list(result.response, "ALREADY_UNSUBSCRIBED_JSON")
+    assert len(already_unsubscribed) == 1
+    assert already_unsubscribed[0]["sender_email"] == "news@qudosbankarena.com.au"
+
+
+def test_unsubscribe_execute_falls_back_to_targeted_search_for_multiple_targets(tmp_path):
+    toolbox = UnsubscribeExecuteToolBox()
+    state_path = tmp_path / "UNSUBSCRIBE_STATE.json"
+    _write_state(state_path, [])
+
+    result = _executor_for(toolbox, state_path).run(
+        _spec(),
+        skill_arguments={
+            "target_queries": ["Qudos Bank Arena", "Product"],
+            "candidate_ids": [],
+            "days": 30,
+            "max_results": 20,
+        },
+        current_message="Unsubscribe from Qudos Bank Arena and Product.",
+        intent_decision=type("Intent", (), {"intent": "Unsubscribe from Qudos Bank Arena and Product."})(),
+        recent_context=[],
+        read_results=[],
+    )
+
+    assert result.completed is True
+    assert result.response is not None
+
+    assert ("post_one_click_unsubscribe", {"url": "https://qudos.example.com/unsubscribe?id=456"}) in toolbox.calls
+    assert ("send", {"to": "unsubscribe@example.com", "subject": "unsubscribe", "body": "unsubscribe"}) in toolbox.calls
+
+    fallback_discovery = _read_section_list(result.response, "FALLBACK_DISCOVERY_JSON")
+    assert len(fallback_discovery) == 2
+
+    stored_payload = json.loads(state_path.read_text(encoding="utf-8"))
+    statuses = {item["sender_email"]: item["status"] for item in stored_payload["items"]}
+    assert statuses["news@qudosbankarena.com.au"] == "hidden_locally_after_unsubscribe"
+    assert statuses["product@vendor.test"] == "hidden_locally_after_unsubscribe"
+
+
+def test_unsubscribe_execute_does_not_auto_execute_unmatched_single_fallback_candidate(tmp_path):
+    toolbox = UnsubscribeExecuteToolBox()
+    state_path = tmp_path / "UNSUBSCRIBE_STATE.json"
+    _write_state(state_path, [])
+
+    result = _executor_for(toolbox, state_path).run(
+        _spec(),
+        skill_arguments={
+            "target_queries": ["Mismatch Brand"],
+            "candidate_ids": [],
+            "days": 30,
+            "max_results": 20,
+        },
+        current_message="Unsubscribe from Mismatch Brand.",
+        intent_decision=type("Intent", (), {"intent": "Unsubscribe from Mismatch Brand."})(),
+        recent_context=[],
+        read_results=[],
+    )
+
+    assert result.completed is True
+    assert result.response is not None
     assert "post_one_click_unsubscribe" not in [name for name, _ in toolbox.calls]
-    assert '"failed": 2' in result.response
-    assert '"request_sent": 1' in result.response
+    assert "send" not in [name for name, _ in toolbox.calls]
+
+    not_found = _read_section_list(result.response, "NOT_FOUND_JSON")
+    assert len(not_found) == 1
+    assert not_found[0]["target_query"] == "Mismatch Brand"
