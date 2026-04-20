@@ -1,0 +1,98 @@
+openapi: 3.0.3
+info:
+  title: EmailAI Agent Gateway API
+  version: 0.1.0
+  description: |
+    Minimal API used by GPT Actions to talk with the Email Agent.
+servers:
+  - url: https://unlionised-rolf-leewardly.ngrok-free.dev
+    description: Replace with your ngrok/cloudflare HTTPS URL
+paths:
+  /agent/health:
+    get:
+      operationId: getAgentHealth
+      summary: Check email-agent runtime health
+      responses:
+        "200":
+          description: Agent health payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentHealthResponse"
+  /agent/chat:
+    post:
+      operationId: sendAgentChat
+      summary: Send one chat message to the email-agent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentChatRequest"
+      responses:
+        "200":
+          description: Agent response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentChatResponse"
+        "502":
+          description: Agent runtime failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentChatResponse"
+components:
+  schemas:
+    AgentChatRequest:
+      type: object
+      required:
+        - message
+      properties:
+        message:
+          type: string
+          description: User input text
+          minLength: 1
+          maxLength: 10000
+          example: 帮我总结今天需要优先回复的邮件
+        conversation_id:
+          type: string
+          description: Reuse this ID for multi-turn conversation
+          example: c1d8d1f9d57d4f52adf6d1be3a89ad8a
+    AgentChatResponse:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum: [ok, error]
+        reply:
+          type: string
+          nullable: true
+          description: Assistant reply text
+        conversation_id:
+          type: string
+          nullable: true
+          description: Conversation identifier to continue chat
+        error:
+          type: string
+          nullable: true
+          description: Error details when status=error
+    AgentHealthResponse:
+      type: object
+      required:
+        - status
+        - loaded
+      properties:
+        status:
+          type: string
+          enum: [ok, error]
+        loaded:
+          type: boolean
+        tool_count:
+          type: integer
+          nullable: true
+        error:
+          type: string
+          nullable: true
