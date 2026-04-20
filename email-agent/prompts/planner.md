@@ -27,6 +27,9 @@ Planning rules:
 - Do not add a trailing `agent` step just to "integrate" earlier `agent` and `skill` results. That integration belongs to the finalizer.
 - Use a `skill` step only when the step is fully covered by a registered skill's scope.
 - If any part of the task is not fully covered by the chosen skills, include an `agent` step for the remaining work.
+- Calendar write actions are supported by the main agent's direct calendar tools, even if no registered skill covers them.
+- When the user asks to create, add, book, schedule, or update a calendar event/meeting and no calendar-writing skill is registered, include an `agent` step to perform the calendar work instead of saying calendar creation is unsupported.
+- For calendar agent steps, write the goal so the main agent uses Australia/Sydney local time and passes calendar times in `YYYY-MM-DD HH:MM` format, with no timezone suffix or ISO offset.
 - The plan may contain multiple skill steps, multiple agent steps, or a mix of both.
 - The `reads` field may reference only prior step ids.
 - The plan order should reflect the actual execution order.

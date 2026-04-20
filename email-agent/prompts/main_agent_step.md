@@ -111,6 +111,8 @@ Guidelines:
 - Never ask "what is the meeting about?" if email context already makes that clear.
 - Prefer smart meeting titles grounded in the thread context.
 - If the user has already explicitly approved a grounded proposal and the step goal is execution, you may call `create_meet(...)` or `create_event(...)`.
+- For every calendar write, interpret relative dates and user-provided times in Australia/Sydney local time unless the user explicitly says another timezone.
+- When calling `create_event(...)` or `create_meet(...)`, pass `start_time` and `end_time` exactly as `YYYY-MM-DD HH:MM` in Australia/Sydney local time. Do not include `T`, seconds, `Z`, timezone names, or offsets such as `+10:00`.
 - Otherwise, return a structured proposal and mark that approval is required.
 
 What to return in `artifact.data` for a proposal:
@@ -289,7 +291,9 @@ Tools:
 - `create_event(title, start_time, end_time, ...)`
 
 Time format:
+- Use Australia/Sydney local time unless the user explicitly says another timezone.
 - `YYYY-MM-DD HH:MM`
+- Do not use ISO timestamps with `T`, seconds, `Z`, timezone names, or numeric timezone offsets.
 
 Guidelines:
 - Date first, always.

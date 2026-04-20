@@ -6,6 +6,7 @@ Pattern: Use ConnectOnion email tools + Memory system + Calendar + Shell + Plugi
 """
 
 import os
+from datetime import datetime
 from pathlib import Path
 
 from connectonion import Agent, Memory, WebFetch, Shell, TodoList
@@ -107,8 +108,137 @@ if has_gmail:
     class GmailCompat(OpenAICompatibleGmailMixin, Gmail):
         pass
 
+    class SydneyGoogleCalendar(GoogleCalendar):
+        """Use local Sydney times for calendar writes instead of UTC."""
+
+        calendar_timezone = AGENT_TIMEZONE
+
+        def _event_time(self, value: str) -> dict[str, str]:
+            parsed_time = self._parse_time(value)
+            return {
+                "dateTime": parsed_time.isoformat(),
+                "timeZone": self.calendar_timezone,
+            }
+
+        def create_event(
+            self,
+            title: str,
+            start_time: str,
+            end_time: str,
+            description: str = None,
+            attendees: str = None,
+            location: str = None,
+        ) -> str:
+            """Create a calendar event using Australia/Sydney local time."""
+            service = self._get_service()
+            start_dt = self._parse_time(start_time)
+
+            event = {
+                "summary": title,
+                "start": self._event_time(start_time),
+                "end": self._event_time(end_time),
+            }
+
+            if description:
+                event["description"] = description
+            if location:
+                event["location"] = location
+            if attendees:
+                event["attendees"] = [{"email": email.strip()} for email in attendees.split(",")]
+
+            created_event = service.events().insert(calendarId="primary", body=event).execute()
+
+            return (
+                f"Event created: {title}\n"
+                f"Start: {self._format_datetime(start_dt.isoformat())} {self.calendar_timezone}\n"
+                f"Event ID: {created_event['id']}\n"
+                f"Link: {created_event.get('htmlLink', '')}"
+            )
+
+        def create_meet(
+            self,
+            title: str,
+            start_time: str,
+            end_time: str,
+            attendees: str,
+            description: str = None,
+        ) -> str:
+            """Create a Google Meet event using Australia/Sydney local time."""
+            service = self._get_service()
+            start_dt = self._parse_time(start_time)
+
+            event = {
+                "summary": title,
+                "start": self._event_time(start_time),
+                "end": self._event_time(end_time),
+                "attendees": [{"email": email.strip()} for email in attendees.split(",")],
+                "conferenceData": {
+                    "createRequest": {
+                        "requestId": f"meet-{datetime.utcnow().timestamp()}",
+                        "conferenceSolutionKey": {"type": "hangoutsMeet"},
+                    }
+                },
+            }
+
+            if description:
+                event["description"] = description
+
+            created_event = service.events().insert(
+                calendarId="primary",
+                body=event,
+                conferenceDataVersion=1,
+            ).execute()
+
+            meet_link = created_event.get("hangoutLink", "No Meet link generated")
+
+            return (
+                f"Meeting created: {title}\n"
+                f"Start: {self._format_datetime(start_dt.isoformat())} {self.calendar_timezone}\n"
+                f"Meet link: {meet_link}\n"
+                f"Event ID: {created_event['id']}"
+            )
+
+        def update_event(
+            self,
+            event_id: str,
+            title: str = None,
+            start_time: str = None,
+            end_time: str = None,
+            description: str = None,
+            attendees: str = None,
+            location: str = None,
+        ) -> str:
+            """Update a calendar event using Australia/Sydney local time."""
+            service = self._get_service()
+            event = service.events().get(calendarId="primary", eventId=event_id).execute()
+
+            if title:
+                event["summary"] = title
+            if description:
+                event["description"] = description
+            if location:
+                event["location"] = location
+            if start_time:
+                event["start"] = self._event_time(start_time)
+            if end_time:
+                event["end"] = self._event_time(end_time)
+            if attendees:
+                event["attendees"] = [{"email": email.strip()} for email in attendees.split(",")]
+
+            updated_event = service.events().update(
+                calendarId="primary",
+                eventId=event_id,
+                body=event,
+            ).execute()
+
+            return (
+                f"Event updated: {updated_event['summary']}\n"
+                f"Timezone: {self.calendar_timezone}\n"
+                f"Event ID: {event_id}"
+            )
+
     tools.append(GmailCompat())
-    tools.append(GoogleCalendar())
+    tools.append(SydneyGoogleCalendar())
     plugins.append(build_gmail_sync_plugin(_get_primary_email_tool))
     plugins.append(calendar_approval_plugin)
 elif has_outlook:
