@@ -228,6 +228,17 @@ pytest -q tests/test_intent_layer.py   # single module
 - [x] 10+ production skills
 - [x] One-click + mailto unsubscribe
 
+## 👥 Team
+
+**UNSW COMP9900 · Team H16C**
+
+- Haokun Yang
+- Haoyuan Xiang
+- Lucia Luo
+- Qifan Zhuo
+- Wenyu Ding
+- Zenglin Zhong
+
 ## 📜 License
 
 Apache License 2.0 — see [`email-agent/LICENSE`](email-agent/LICENSE).
@@ -449,6 +460,17 @@ pytest -q tests/test_intent_layer.py     # 单模块
 - [x] 意图层编排器
 - [x] 10+ 生产级技能
 - [x] 一键退订 + mailto 兜底
+
+## 👥 团队
+
+**UNSW COMP9900 · Team H16C**
+
+- Haokun Yang
+- Haoyuan Xiang
+- Lucia Luo
+- Qifan Zhuo
+- Wenyu Ding
+- Zenglin Zhong
 
 ## 📜 许可证
 
