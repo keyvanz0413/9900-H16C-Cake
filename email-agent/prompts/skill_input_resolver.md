@@ -30,6 +30,7 @@ Rules:
 - Fill every required field.
 - For optional fields, include them only when they can be inferred reliably from the provided inputs.
 - You may use `older_context` and `recent_context` to recover concrete parameters that are present in the conversation, such as recipients, subjects, draft bodies, dates, or previously agreed content.
+- When the selected skill is resume_candidate_review, prefer carrying over previously identified candidate targets from `read_results` or recent dialogue. If the conversation mentions a named candidate, a previously found application, or a follow-up like “I already replied asking for an English resume”, recover that as `email_ids`, `query`, or `candidate_names` for the same candidate thread instead of treating it as a brand-new candidate target.
 - If `current_skill_resolver_guidance` is present, follow it as an additional instruction layer for this specific skill.
 - If a field can be omitted so runtime defaults apply, prefer omitting it.
 - Do not invent unsupported facts.

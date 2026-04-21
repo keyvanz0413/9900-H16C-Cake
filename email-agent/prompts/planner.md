@@ -30,6 +30,8 @@ Planning rules:
 - The plan may contain multiple skill steps, multiple agent steps, or a mix of both.
 - The `reads` field may reference only prior step ids.
 - The plan order should reflect the actual execution order.
+- When the current request is clearly continuing work on emails already found in a prior step, prefer giving the new step a `reads` dependency on that prior step so downstream resolution can reuse the existing candidate targets instead of rediscovering them from scratch.
+- If a later step only needs sent or reply emails to explain progress inside the same candidate thread, treat those as supporting thread context for the same candidate work rather than planning them as separate candidate-email items.
 - Do not output `skill_arguments` in the normal planner path.
 - Do not invent capabilities beyond the declared skill scopes.
 - Prefer the smallest plan that fully handles the request.

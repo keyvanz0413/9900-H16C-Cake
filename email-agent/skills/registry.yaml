@@ -124,19 +124,39 @@ skills:
         description: Number of recent days to inspect for bug-related or engineering-problem emails, capped at 7.
     output: A user-facing prioritized bug triage grounded only in keyword search hits and the fetched full bodies of every matched email.
   - name: resume_candidate_review
-    description: Find recent candidate, application, or resume-related inbox emails, inspect whether they include attachments, and pass relevant extracted attachment text through to the external finalizer for structured candidate summaries.
+    description: Find candidate, application, or resume-related emails, prefer explicit candidate targets or prior step results when available, separate primary candidate hits from thread-context follow-ups, and pass relevant extracted attachment text through for structured candidate summaries.
     scope: Read-only resume and candidate review workflow. Never send email and never modify mailbox state.
     used_tools:
       - search_emails
       - get_email_attachments
       - extract_recent_attachment_texts
+    resolver_guidance: For resume_candidate_review, prefer explicit carryover from read_results or recent_context. If prior step results already contain matched candidate email ids, return them in email_ids. If the user names candidates or refers to a previously found candidate thread, recover candidate_names or a narrow query instead of defaulting to a fresh recent scan. Treat sent follow-ups such as asking for an English resume as thread context for the same candidate rather than a new candidate hit.
     input_schema:
       days:
         type: int
         required: false
         default: 7
-        description: Number of recent days to inspect for candidate, application, or resume-related emails, capped at 7.
-    output: A user-facing structured candidate review grounded only in the search hits, attachment listings, and any extracted attachment text from matched candidate emails.
+        description: Number of recent days to inspect in fallback recent-scan mode, capped at 7.
+      query:
+        type: string
+        required: false
+        description: Optional narrow mailbox query for a specific candidate, sender, subject, or application thread.
+      candidate_names:
+        type: list
+        required: false
+        default: []
+        description: Optional candidate names recovered from context when exact email ids are unavailable.
+      email_ids:
+        type: list
+        required: false
+        default: []
+        description: Optional explicit candidate email ids recovered from prior step results or recent context.
+      mailbox_scope:
+        type: string
+        required: false
+        default: inbox
+        description: Mailbox scope for search-based modes. Use inbox by default, or all when a targeted flow should include sent or copied thread context.
+    output: A user-facing structured candidate review grounded only in the resolved candidate targets, attachment listings, thread-context classification, and any extracted attachment text from primary candidate emails.
   - name: draft_reply_from_email_context
     description: Locate a target email either by unanswered-message rank or by a mailbox search query, then fetch the target email body so the outer layer can draft a reply.
     scope: Draft-only reply workflow. Never send email and never modify mailbox state.

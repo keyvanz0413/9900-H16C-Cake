@@ -283,6 +283,55 @@ class ResumeCandidateToolBox:
         )
 
 
+class ResumeCandidateCarryoverToolBox:
+    def __init__(self):
+        self.calls: list[tuple[str, dict[str, object]]] = []
+        self._lock = threading.Lock()
+
+    def _record(self, tool_name: str, **kwargs: object) -> None:
+        with self._lock:
+            self.calls.append((tool_name, kwargs))
+
+    def search_emails(self, query: str, max_results: int = 10) -> str:
+        self._record("search_emails", query=query, max_results=max_results)
+        raise AssertionError("search_emails should not be called when read_results already provides email ids.")
+
+    def get_email_attachments(self, email_id: str) -> str:
+        self._record("get_email_attachments", email_id=email_id)
+        if email_id == "resume-101":
+            return (
+                "Found 1 attachment(s):\n\n"
+                "1. Aiden_Resume.pdf (101.0 KB)\n"
+                "   ID: att-resume-101\n"
+            )
+        return "No attachments in this email."
+
+    def extract_recent_attachment_texts(self, query: str, max_results: int = 10) -> str:
+        self._record("extract_recent_attachment_texts", query=query, max_results=max_results)
+        return (
+            "Recent attachment text extraction results.\n"
+            'Query: (from:aiden@example.com OR subject:\"Application for AI-Related Opportunity\") has:attachment\n'
+            "Message scan limit: 350\n"
+            "Matched message count: 1\n"
+            "Attachment count: 1\n"
+            "Extracted attachment count: 1\n\n"
+            "[EMAIL_1]\n"
+            "Message ID: resume-101\n"
+            "Thread ID: thread-aiden-1\n"
+            "From: Aiden Applicant <aiden@example.com>\n"
+            "Subject: Application for AI-Related Opportunity\n"
+            "Date: Tue, 08 Apr 2026 09:30:00 +0000\n"
+            "Attachment count: 1\n"
+            "[ATTACHMENT_1_1]\n"
+            "Filename: Aiden_Resume.pdf\n"
+            "MIME Type: application/pdf\n"
+            "Attachment ID: att-resume-101\n"
+            "Status: extracted\n"
+            "Extracted Text:\n"
+            "Aiden Applicant. ML engineer. Python, NLP, evaluation, prompt engineering.\n"
+        )
+
+
 class SendPreparedEmailToolBox:
     def __init__(self):
         self.calls: list[tuple[str, dict[str, object]]] = []
@@ -1658,12 +1707,15 @@ def test_resume_candidate_review_skill_uses_fixed_workflow(repo_root: Path | Non
 
     assert result.completed is True
     assert "[RESUME_CANDIDATE_REVIEW_BUNDLE]" in result.response
+    assert "execution_mode: recent_scan" in result.response
     assert "search_query: in:inbox newer_than:7d" in result.response
+    assert "primary_candidate_email_count: 2" in result.response
+    assert "thread_context_email_count: 0" in result.response
     assert "[SEARCH_EMAILS]" in result.response
     assert "[ATTACHMENT_CHECK_RESULTS]" in result.response
-    assert "[MATCHED_CANDIDATE_EMAIL_IDS_WITH_ATTACHMENTS]" in result.response
+    assert "[MATCHED_PRIMARY_CANDIDATE_EMAIL_IDS_WITH_ATTACHMENTS]" in result.response
     assert "[RELEVANT_ATTACHMENT_TEXT_EXTRACTIONS]" in result.response
-    assert "Finalizer instruction: produce a structured candidate summary for each relevant candidate email, grounded first in extracted attachment text when available." in result.response
+    assert "Finalizer instruction: produce a structured candidate summary for each primary candidate email" in result.response
     assert "resume-001, resume-002" in result.response
     assert "resume-001" in result.response
     assert "Riley Applicant. Backend engineer. Python, FastAPI, Postgres, LLM tooling." in result.response
@@ -1682,6 +1734,122 @@ def test_resume_candidate_review_skill_uses_fixed_workflow(repo_root: Path | Non
             "extract_recent_attachment_texts",
             {
                 "query": 'in:inbox newer_than:7d (candidate OR applicant OR application OR resume OR cv OR portfolio OR "job application" OR "application for" OR "applying for" OR "cover letter" OR "candidate profile" OR "candidate submission" OR "resume attached" OR "cv attached") has:attachment',
+                "max_results": 350,
+            },
+        ),
+    ]
+
+
+def test_resume_candidate_review_skill_uses_read_results_and_dedupes_thread_context(repo_root: Path | None = None):
+    del repo_root
+    toolbox = ResumeCandidateCarryoverToolBox()
+    tool_function_map = build_tool_function_map([toolbox])
+    skills_directory = Path(__file__).resolve().parent.parent / "skills"
+
+    executor = PythonSkillExecutor(
+        skills_directory=skills_directory,
+        tool_function_map=tool_function_map,
+    )
+
+    result = executor.run(
+        SkillSpec(
+            name="resume_candidate_review",
+            description="Find candidate, application, or resume-related emails, prefer explicit candidate targets or prior step results when available, separate primary candidate hits from thread-context follow-ups, and pass relevant extracted attachment text through for structured candidate summaries.",
+            scope="Read-only resume and candidate review workflow. Never send email and never modify mailbox state.",
+            used_tools=("search_emails", "get_email_attachments", "extract_recent_attachment_texts"),
+            output="A user-facing structured candidate review grounded only in the resolved candidate targets, attachment listings, thread-context classification, and any extracted attachment text from primary candidate emails.",
+            input_schema=(
+                SkillInputFieldSpec(
+                    name="days",
+                    field_type="int",
+                    required=False,
+                    description="Number of recent days to inspect in fallback recent-scan mode.",
+                    has_default=True,
+                    default=7,
+                ),
+                SkillInputFieldSpec(
+                    name="query",
+                    field_type="string",
+                    required=False,
+                    description="Optional narrow mailbox query.",
+                ),
+                SkillInputFieldSpec(
+                    name="candidate_names",
+                    field_type="list",
+                    required=False,
+                    description="Candidate names recovered from context.",
+                    has_default=True,
+                    default=[],
+                ),
+                SkillInputFieldSpec(
+                    name="email_ids",
+                    field_type="list",
+                    required=False,
+                    description="Explicit candidate email ids.",
+                    has_default=True,
+                    default=[],
+                ),
+                SkillInputFieldSpec(
+                    name="mailbox_scope",
+                    field_type="string",
+                    required=False,
+                    description="Mailbox scope.",
+                    has_default=True,
+                    default="all",
+                ),
+            ),
+        ),
+        skill_arguments={},
+        current_message="总结 Aiden 的附件，刚刚那封申请我已经回复问他要英文版简历了",
+        intent_decision=type(
+            "IntentDecisionLike",
+            (),
+            {"intent": "用户想让我基于刚刚找到的 Aiden 申请邮件继续总结附件，并把后续跟进作为线程上下文。"},
+        )(),
+        recent_context=[],
+        read_results=[
+            {
+                "step_id": "step_1",
+                "type": "agent",
+                "status": "completed",
+                "artifact": {
+                    "summary": (
+                        "Found 2 email(s):\n\n"
+                        "1. [UNREAD] From: Aiden Applicant <aiden@example.com>\n"
+                        "   Subject: Application for AI-Related Opportunity\n"
+                        "   Date: Tue, 08 Apr 2026 09:30:00 +0000\n"
+                        "   Preview: Please find attached my resume.\n"
+                        "   ID: resume-101\n\n"
+                        "2. [SENT] From: Aiden Yang <me@example.com>\n"
+                        "   Subject: Re: Application for AI-Related Opportunity\n"
+                        "   Date: Tue, 08 Apr 2026 10:00:00 +0000\n"
+                        "   Preview: Could you please send your English resume as well?\n"
+                        "   ID: resume-102\n"
+                    )
+                },
+                "reason": "Earlier candidate search completed.",
+            }
+        ],
+    )
+
+    assert result.completed is True
+    assert "execution_mode: email_ids" in result.response
+    assert "[PRIMARY_CANDIDATE_EMAIL_IDS]" in result.response
+    assert "resume-101" in result.response
+    assert "[THREAD_CONTEXT_EMAIL_IDS]" in result.response
+    assert "resume-102" in result.response
+    assert "primary_candidate_email_count: 1" in result.response
+    assert "thread_context_email_count: 1" in result.response
+    assert "These email ids were treated as follow-up or thread-context messages" in result.response
+    assert "Aiden Applicant. ML engineer. Python, NLP, evaluation, prompt engineering." in result.response
+
+    assert toolbox.calls == [
+        ("get_email_attachments", {"email_id": "resume-101"}),
+        ("get_email_attachments", {"email_id": "resume-102"}),
+        (
+            "extract_recent_attachment_texts",
+            {
+                "query": '(from:aiden@example.com OR subject:"Application for AI-Related Opportunity") has:attachment',
                 "max_results": 350,
             },
         ),

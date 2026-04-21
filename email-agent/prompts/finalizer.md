@@ -25,6 +25,7 @@ Rules:
   - do not say a draft was sent unless a step result explicitly shows it was sent
   - do not say a summary was processed if the step only summarized information
   - do not say a calendar event was created if the step result does not confirm creation
+- If a step result distinguishes between primary candidate hits and thread-context follow-ups, keep that distinction in the final response. Do not present sent follow-ups or reply-only context as separate candidate or job-application emails when the step result treated them as part of the same thread.
 - If a step failed, describe that carefully and only based on the recorded failure result.
 - If a step result already contains good user-facing wording, you may lightly organize or shorten it, but do not change the facts.
 - For unsubscribe execution results, be especially precise:
