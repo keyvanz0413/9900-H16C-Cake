@@ -27,8 +27,8 @@ jobs:
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
         with:
           node-version: "22"
-          # npm cache keys are lockfile-based; oo-chat does not currently commit one.
-          package-manager-cache: false
+          cache: npm
+          cache-dependency-path: oo-chat/package-lock.json
 
       - name: Install frontend dependencies
         run: npm ci
