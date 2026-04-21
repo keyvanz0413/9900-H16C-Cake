@@ -5,7 +5,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Callable
 
-from connectonion.core.events import after_each_tool
+try:
+    from connectonion.core.events import after_each_tool
+except ImportError:
+    from connectonion.events import after_tool as after_each_tool
 
 
 def build_gmail_sync_plugin(email_tool_getter: Callable[[], Any]) -> list[Callable[[Any], None]]:

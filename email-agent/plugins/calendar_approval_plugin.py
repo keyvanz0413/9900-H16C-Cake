@@ -5,14 +5,23 @@ from __future__ import annotations
 import sys
 from typing import TYPE_CHECKING, Any
 
-from connectonion.core.events import before_each_tool
-from connectonion.tui import pick
+try:
+    from connectonion.core.events import before_each_tool
+except ImportError:
+    from connectonion.events import before_tool as before_each_tool
+try:
+    from connectonion.tui import pick
+except ImportError:
+    from connectonion import pick
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
 if TYPE_CHECKING:
-    from connectonion.core.agent import Agent
+    try:
+        from connectonion.core.agent import Agent
+    except ImportError:
+        from connectonion.agent import Agent
 
 _console = Console()
 WRITE_METHODS = ("create_event", "create_meet", "update_event", "delete_event")

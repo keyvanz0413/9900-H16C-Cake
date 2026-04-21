@@ -6,8 +6,7 @@ Textual-based chat interface with slash commands and autocomplete.
 
 import subprocess
 from pathlib import Path
-
-from connectonion.tui import Chat, CommandItem
+from typing import Any
 
 from agent import agent
 from .core import (
@@ -38,20 +37,20 @@ def _set_env_flag(key: str, value: str):
     env_path.write_text('\n'.join(lines) + '\n')
 
 
-# Commands for autocomplete (main=display text, id=actual command to insert)
+# Stable command metadata used by tests and converted for the TUI at runtime.
 COMMANDS = [
-    CommandItem(main="/today - Daily briefing", prefix="📅", id="/today"),
-    CommandItem(main="/inbox - Show emails", prefix="📥", id="/inbox"),
-    CommandItem(main="/search - Search emails", prefix="🔍", id="/search "),
-    CommandItem(main="/contacts - View contacts", prefix="👥", id="/contacts"),
-    CommandItem(main="/sync - Sync contacts", prefix="🔄", id="/sync"),
-    CommandItem(main="/init - Initialize CRM", prefix="🗄️", id="/init"),
-    CommandItem(main="/unanswered - Pending replies", prefix="⏳", id="/unanswered"),
-    CommandItem(main="/identity - Email identity", prefix="🆔", id="/identity"),
-    CommandItem(main="/link-gmail - Connect Gmail", prefix="🔗", id="/link-gmail"),
-    CommandItem(main="/link-outlook - Connect Outlook", prefix="🔗", id="/link-outlook"),
-    CommandItem(main="/help - Show commands", prefix="❓", id="/help"),
-    CommandItem(main="/quit - Exit", prefix="👋", id="/quit"),
+    ("/today", "📅", "Daily briefing"),
+    ("/inbox", "📥", "Show emails"),
+    ("/search", "🔍", "Search emails"),
+    ("/contacts", "👥", "View contacts"),
+    ("/sync", "🔄", "Sync contacts"),
+    ("/init", "🗄️", "Initialize CRM"),
+    ("/unanswered", "⏳", "Pending replies"),
+    ("/identity", "🆔", "Email identity"),
+    ("/link-gmail", "🔗", "Connect Gmail"),
+    ("/link-outlook", "🔗", "Connect Outlook"),
+    ("/help", "❓", "Show commands"),
+    ("/quit", "👋", "Exit"),
 ]
 
 
@@ -114,8 +113,33 @@ def _handle_error(error: Exception) -> str:
         return f"**Error**\n\n`{error}`\n\nTry `/help` to see available commands"
 
 
+def _build_command_items() -> list[Any]:
+    """Convert stable command metadata into the TUI's runtime item type."""
+    try:
+        from connectonion.tui import CommandItem
+    except ImportError:
+        return [command for command in COMMANDS]
+
+    items = []
+    for command, prefix, description in COMMANDS:
+        insert_text = "/search " if command == "/search" else command
+        items.append(CommandItem(
+            main=f"{command} - {description}",
+            prefix=prefix,
+            id=insert_text,
+        ))
+    return items
+
+
 def interactive():
     """Full interactive mode with chat UI."""
+    try:
+        from connectonion.tui import Chat
+    except ImportError as error:
+        raise RuntimeError(
+            "Interactive mode requires a connectonion build that exposes connectonion.tui.Chat."
+        ) from error
+
     # Load contacts for @ autocomplete
     contact_provider = ContactProvider()
     contacts = contact_provider.to_command_items()
@@ -125,7 +149,7 @@ def interactive():
         agent=agent,
         title="Email Agent",
         triggers={
-            "/": COMMANDS,
+            "/": _build_command_items(),
             "@": contacts,
         },
         welcome=WELCOME,

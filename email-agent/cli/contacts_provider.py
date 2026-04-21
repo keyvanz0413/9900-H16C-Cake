@@ -118,7 +118,10 @@ class ContactProvider:
         Returns list of CommandItem (DropdownItem from textual-autocomplete).
         Uses main for display (name - email), id for inserted value (@email).
         """
-        from connectonion.tui import CommandItem
+        try:
+            from connectonion.tui import CommandItem
+        except ImportError:
+            CommandItem = None
 
         contacts = self._load_contacts()
         items = []
@@ -129,6 +132,10 @@ class ContactProvider:
 
             # Display: name - email (or just email if no name)
             display = f"{name} - {email}" if name else email
+
+            if CommandItem is None:
+                items.append((f"@{email}", self._get_icon(contact), display))
+                continue
 
             items.append(CommandItem(
                 main=display,
