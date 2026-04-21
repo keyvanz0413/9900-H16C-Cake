@@ -72,7 +72,7 @@ jobs:
           OPENONION_API_KEY: ci-dummy-key
           OPENAI_API_KEY: ci-dummy-key
           AGENT_MODEL: gpt-4o-mini
-          GOOGLE_SCOPES: "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send"
+          GOOGLE_SCOPES: "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/calendar"
           GOOGLE_ACCESS_TOKEN: ci-dummy
           GOOGLE_REFRESH_TOKEN: ci-dummy
           LINKED_GMAIL: "true"
