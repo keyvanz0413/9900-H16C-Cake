@@ -68,4 +68,13 @@ jobs:
         run: uv sync --locked --extra dev
 
       - name: Run backend tests
+        env:
+          OPENONION_API_KEY: ci-dummy-key
+          OPENAI_API_KEY: ci-dummy-key
+          AGENT_MODEL: gpt-4o-mini
+          GOOGLE_SCOPES: "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send"
+          GOOGLE_ACCESS_TOKEN: ci-dummy
+          GOOGLE_REFRESH_TOKEN: ci-dummy
+          LINKED_GMAIL: "true"
+          LINKED_OUTLOOK: "false"
         run: uv run pytest tests -m "not real_api"
