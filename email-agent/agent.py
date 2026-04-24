@@ -6,6 +6,7 @@ Pattern: Use ConnectOnion email tools + Memory system + Calendar + Shell + Plugi
 """
 
 import os
+import inspect
 from pathlib import Path
 
 from connectonion import Agent, Memory, WebFetch, Shell, TodoList
@@ -50,6 +51,122 @@ class OpenAICompatibleGmailMixin:
     def bulk_update_contacts(self, updates: list[dict]) -> str:
         return super().bulk_update_contacts(updates)
 
+
+class UnavailableConfiguredAgent:
+    """Import-safe stand-in when LLM credentials are unavailable in test/CI environments."""
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        tools,
+        plugins=None,
+        max_iterations: int,
+        model: str,
+        reason: str,
+    ):
+        self.name = name
+        self.tools = tools
+        self.plugins = plugins or []
+        self.max_iterations = max_iterations
+        self.current_session = None
+        self.llm = type("LLM", (), {"model": model})()
+        self._reason = reason
+
+    def input(
+        self,
+        prompt: str,
+        max_iterations: int | None = None,
+        session: dict | None = None,
+        images: list[str] | None = None,
+        files: list[dict] | None = None,
+    ) -> str:
+        del prompt, max_iterations, images, files
+        if isinstance(session, dict):
+            self.current_session = session
+        raise RuntimeError(self._reason)
+
+
+class ToolHandle:
+    """Compatibility wrapper exposing the legacy `.name` attribute in tests."""
+
+    def __init__(self, name: str, target):
+        self.name = name
+        self.target = target
+
+
+class ToolCollection(list):
+    """Flatten tool sources into iterable named handles while preserving provider attrs."""
+
+    def __init__(self, tool_sources: list):
+        handles: list[ToolHandle] = []
+        for source in tool_sources:
+            if inspect.isfunction(source) or inspect.ismethod(source) or inspect.isbuiltin(source):
+                name = getattr(source, "__name__", "")
+                if name and not name.startswith("_"):
+                    handles.append(ToolHandle(name, source))
+                continue
+
+            for name, member in inspect.getmembers(source):
+                if name.startswith("_") or not callable(member):
+                    continue
+                handles.append(ToolHandle(name, member))
+
+        super().__init__(handles)
+
+    def names(self) -> list[str]:
+        """Return stable tool names for runtime metadata extraction."""
+        return list(dict.fromkeys(handle.name for handle in self))
+
+
+class UnavailableEmailProvider:
+    """Placeholder provider when the installed connectonion build lacks that backend."""
+
+    def __init__(self, provider_name: str):
+        self.provider_name = provider_name
+
+    def _raise_unavailable(self):
+        raise RuntimeError(
+            f"{self.provider_name.title()} support is unavailable in the installed connectonion package."
+        )
+
+    def read_inbox(self, *args, **kwargs):
+        self._raise_unavailable()
+
+    def search_emails(self, *args, **kwargs):
+        self._raise_unavailable()
+
+    def send(self, *args, **kwargs):
+        self._raise_unavailable()
+
+    def mark_read(self, *args, **kwargs):
+        self._raise_unavailable()
+
+    def get_unanswered_emails(self, *args, **kwargs):
+        self._raise_unavailable()
+
+    def get_my_identity(self, *args, **kwargs):
+        self._raise_unavailable()
+
+    def detect_all_my_emails(self, *args, **kwargs):
+        self._raise_unavailable()
+
+
+def _build_configured_agent(*, reason_prefix: str, **kwargs):
+    try:
+        return Agent(**kwargs)
+    except ValueError as exc:
+        if "API key required" not in str(exc):
+            raise
+        return UnavailableConfiguredAgent(
+            name=kwargs["name"],
+            tools=kwargs.get("tools", []),
+            plugins=kwargs.get("plugins", []),
+            max_iterations=kwargs.get("max_iterations", 1),
+            model=kwargs.get("model", MODEL_NAME),
+            reason=f"{reason_prefix}: {exc}",
+        )
+
 # Create shared tool instances
 memory = Memory(memory_file="data/memory.md")
 web = WebFetch()  # For analyzing contact domains
@@ -58,6 +175,17 @@ todo = TodoList()  # For tracking multi-step tasks
 
 def _env_flag(name: str) -> bool:
     return os.getenv(name, "").strip().lower() == "true"
+
+
+def _provider_is_linked(flag_name: str, *token_env_names: str) -> bool:
+    explicit_flag = os.getenv(flag_name)
+    if explicit_flag is not None:
+        return explicit_flag.strip().lower() == "true"
+
+    if os.getenv("PYTEST_CURRENT_TEST") or os.getenv("CI"):
+        return False
+
+    return any(os.getenv(token_name) for token_name in token_env_names)
 
 
 def _get_primary_email_tool():
@@ -93,14 +221,20 @@ get_unsubscribe_info = build_get_unsubscribe_info_tool(_get_primary_email_tool)
 tools = []
 plugins = [re_act]
 
-has_gmail = _env_flag("LINKED_GMAIL") or bool(
-    os.getenv("GOOGLE_ACCESS_TOKEN") or os.getenv("GOOGLE_REFRESH_TOKEN")
+has_gmail = _provider_is_linked(
+    "LINKED_GMAIL",
+    "GOOGLE_ACCESS_TOKEN",
+    "GOOGLE_REFRESH_TOKEN",
 )
-has_outlook = _env_flag("LINKED_OUTLOOK") or bool(
-    os.getenv("MICROSOFT_ACCESS_TOKEN") or os.getenv("MICROSOFT_REFRESH_TOKEN")
+has_outlook = _provider_is_linked(
+    "LINKED_OUTLOOK",
+    "MICROSOFT_ACCESS_TOKEN",
+    "MICROSOFT_REFRESH_TOKEN",
 )
 
 # Prefer Gmail if both are linked (can only use one due to method name conflicts)
+system_prompt = "prompts/main_agent_step.md"
+
 if has_gmail:
     from connectonion import Gmail, GoogleCalendar
 
@@ -111,17 +245,24 @@ if has_gmail:
     tools.append(GoogleCalendar())
     plugins.append(build_gmail_sync_plugin(_get_primary_email_tool))
     plugins.append(calendar_approval_plugin)
+    system_prompt = "prompts/gmail_agent.md"
 elif has_outlook:
-    from connectonion import Outlook, MicrosoftCalendar
-    tools.append(Outlook())
-    tools.append(MicrosoftCalendar())
+    try:
+        from connectonion import Outlook, MicrosoftCalendar
+    except ImportError:
+        tools.append(UnavailableEmailProvider("outlook"))
+    else:
+        tools.append(Outlook())
+        tools.append(MicrosoftCalendar())
+    system_prompt = "prompts/outlook_agent.md"
 
 # Warn if no email provider configured
 if not tools:
     print("\n⚠️  No email account connected. Use /link-gmail or /link-outlook to connect.\n")
 
 # Create init sub-agent for CRM database setup
-init_crm = Agent(
+init_crm = _build_configured_agent(
+    reason_prefix="CRM init agent is unavailable",
     name="crm-init",
     system_prompt=PROMPTS_DIR / "crm_init.md",
     tools=tools + [memory, web],
@@ -162,8 +303,15 @@ if has_gmail:
         ]
     )
 
+compat_tools = ToolCollection(tools)
+if has_gmail and tools:
+    compat_tools.gmail = tools[0]
+elif has_outlook and tools:
+    compat_tools.outlook = tools[0]
+
 # Create main execution agent
-main_agent = Agent(
+main_agent = _build_configured_agent(
+    reason_prefix="Main email agent is unavailable",
     name="email-agent",
     system_prompt=PROMPTS_DIR / "main_agent_step.md",
     tools=tools,
@@ -173,7 +321,8 @@ main_agent = Agent(
 )
 
 # Intent and orchestration helper agents are lightweight single-step LLM calls.
-intent_agent = Agent(
+intent_agent = _build_configured_agent(
+    reason_prefix="Intent layer agent is unavailable",
     name="email-agent-intent-layer",
     system_prompt=PROMPTS_DIR / "intent_layer.md",
     tools=[],
@@ -181,7 +330,8 @@ intent_agent = Agent(
     model=INTENT_MODEL_NAME,
 )
 
-planner_agent = Agent(
+planner_agent = _build_configured_agent(
+    reason_prefix="Planner agent is unavailable",
     name="email-agent-planner",
     system_prompt=PROMPTS_DIR / "planner.md",
     tools=[],
@@ -189,7 +339,8 @@ planner_agent = Agent(
     model=PLANNER_MODEL_NAME,
 )
 
-skill_input_resolver_agent = Agent(
+skill_input_resolver_agent = _build_configured_agent(
+    reason_prefix="Skill input resolver agent is unavailable",
     name="email-agent-skill-input-resolver",
     system_prompt=PROMPTS_DIR / "skill_input_resolver.md",
     tools=[],
@@ -197,7 +348,8 @@ skill_input_resolver_agent = Agent(
     model=SKILL_INPUT_RESOLVER_MODEL_NAME,
 )
 
-finalizer_agent = Agent(
+finalizer_agent = _build_configured_agent(
+    reason_prefix="Finalizer agent is unavailable",
     name="email-agent-finalizer",
     system_prompt=PROMPTS_DIR / "finalizer.md",
     tools=[],
@@ -205,7 +357,8 @@ finalizer_agent = Agent(
     model=FINALIZER_MODEL_NAME,
 )
 
-user_memory_writer_agent = Agent(
+user_memory_writer_agent = _build_configured_agent(
+    reason_prefix="User memory writer agent is unavailable",
     name="email-agent-user-memory-writer",
     system_prompt=PROMPTS_DIR / "user_memory_writer.md",
     tools=[],
@@ -213,7 +366,8 @@ user_memory_writer_agent = Agent(
     model=USER_MEMORY_MODEL_NAME,
 )
 
-writing_style_writer_agent = Agent(
+writing_style_writer_agent = _build_configured_agent(
+    reason_prefix="Writing style writer agent is unavailable",
     name="email-agent-writing-style-writer",
     system_prompt=PROMPTS_DIR / "writing_style_writer.md",
     tools=[],
@@ -252,6 +406,7 @@ agent = IntentLayerOrchestrator(
     writing_style_path=WRITING_STYLE_PATH,
     timezone_name=AGENT_TIMEZONE,
 )
+agent.tools = compat_tools
 
 # Example usage
 if __name__ == "__main__":

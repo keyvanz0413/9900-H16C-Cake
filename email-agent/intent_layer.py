@@ -78,7 +78,7 @@ class IntentDecision:
 
     @property
     def should_direct_respond(self) -> bool:
-        return self.no_execution_confidence > DIRECT_RESPONSE_THRESHOLD and bool(self.final_response)
+        return self.no_execution_confidence >= DIRECT_RESPONSE_THRESHOLD and bool(self.final_response)
 
 
 @dataclass(frozen=True)
@@ -844,9 +844,11 @@ class IntentLayerOrchestrator:
         *,
         main_agent: SupportsInput,
         intent_agent: SupportsInput,
-        planner_agent: SupportsInput,
-        skill_input_resolver_agent: SupportsInput,
-        finalizer_agent: SupportsInput,
+        planner_agent: SupportsInput | None = None,
+        skill_input_resolver_agent: SupportsInput | None = None,
+        finalizer_agent: SupportsInput | None = None,
+        skill_selector_agent: SupportsInput | None = None,
+        skill_finalizer_agent: SupportsInput | None = None,
         skill_executor: SupportsSkillExecution | None,
         memory_store: MarkdownMemoryStore,
         skill_registry_path: Path,
@@ -857,7 +859,9 @@ class IntentLayerOrchestrator:
         self._intent_agent = intent_agent
         self._planner_agent = planner_agent
         self._skill_input_resolver_agent = skill_input_resolver_agent
-        self._finalizer_agent = finalizer_agent
+        self._finalizer_agent = finalizer_agent or skill_finalizer_agent
+        self._skill_selector_agent = skill_selector_agent
+        self._compatibility_mode = planner_agent is None and skill_selector_agent is not None
         self._skill_executor = skill_executor
         self._memory_store = memory_store
         self._skill_registry_path = skill_registry_path
@@ -908,49 +912,63 @@ class IntentLayerOrchestrator:
                 response = intent_decision.final_response or ""
             else:
                 available_skills = load_skill_registry(self._skill_registry_path)
-                execution_plan = self._plan_execution(
-                    intent_decision=intent_decision,
-                    current_message=prompt,
-                    older_context=older_context,
-                    recent_context=recent_context,
-                    available_skills=available_skills,
-                )
-                self._log_route(
-                    "planner",
-                    confidence=intent_decision.no_execution_confidence,
-                    intent=intent_decision.intent,
-                    reason=execution_plan.reason,
-                    step_count=len(execution_plan.steps),
-                    steps=[self._serialize_plan_step(step) for step in execution_plan.steps],
-                    registered_skills=len(available_skills),
-                )
-                step_results = self._execute_plan(
-                    execution_plan=execution_plan,
-                    available_skills=available_skills,
-                    user_message=prompt,
-                    intent_decision=intent_decision,
-                    older_context=older_context,
-                    recent_context=recent_context,
-                    date_grounding=date_grounding,
-                    max_iterations=max_iterations,
-                    session=session,
-                    images=images,
-                    files=files,
-                )
-                self._log_route(
-                    "finalizer_started",
-                    step_count=len(step_results),
-                )
-                response, finalizer_reason = self._finalize_execution(
-                    intent_decision=intent_decision,
-                    older_context=older_context,
-                    recent_context=recent_context,
-                    step_results=step_results,
-                )
-                self._log_route(
-                    "finalizer_finished",
-                    reason=finalizer_reason,
-                )
+                if self._compatibility_mode:
+                    response = self._run_compatibility_flow(
+                        user_message=prompt,
+                        intent_decision=intent_decision,
+                        available_skills=available_skills,
+                        older_context=older_context,
+                        recent_context=recent_context,
+                        date_grounding=date_grounding,
+                        max_iterations=max_iterations,
+                        session=session,
+                        images=images,
+                        files=files,
+                    )
+                else:
+                    execution_plan = self._plan_execution(
+                        intent_decision=intent_decision,
+                        current_message=prompt,
+                        older_context=older_context,
+                        recent_context=recent_context,
+                        available_skills=available_skills,
+                    )
+                    self._log_route(
+                        "planner",
+                        confidence=intent_decision.no_execution_confidence,
+                        intent=intent_decision.intent,
+                        reason=execution_plan.reason,
+                        step_count=len(execution_plan.steps),
+                        steps=[self._serialize_plan_step(step) for step in execution_plan.steps],
+                        registered_skills=len(available_skills),
+                    )
+                    step_results = self._execute_plan(
+                        execution_plan=execution_plan,
+                        available_skills=available_skills,
+                        user_message=prompt,
+                        intent_decision=intent_decision,
+                        older_context=older_context,
+                        recent_context=recent_context,
+                        date_grounding=date_grounding,
+                        max_iterations=max_iterations,
+                        session=session,
+                        images=images,
+                        files=files,
+                    )
+                    self._log_route(
+                        "finalizer_started",
+                        step_count=len(step_results),
+                    )
+                    response, finalizer_reason = self._finalize_execution(
+                        intent_decision=intent_decision,
+                        older_context=older_context,
+                        recent_context=recent_context,
+                        step_results=step_results,
+                    )
+                    self._log_route(
+                        "finalizer_finished",
+                        reason=finalizer_reason,
+                    )
 
             dialogue_store.append({"role": "user", "content": prompt})
             dialogue_store.append({"role": "assistant", "content": response})
@@ -1092,11 +1110,11 @@ class IntentLayerOrchestrator:
 
         final_response_raw = payload.get("final_response")
         final_response = None if final_response_raw is None else str(final_response_raw).strip()
-        if confidence > DIRECT_RESPONSE_THRESHOLD and not final_response:
-            raise IntentLayerError("Intent layer returned no_execution_confidence > 9.0 without a final_response.")
-        if confidence <= DIRECT_RESPONSE_THRESHOLD and final_response is not None:
-            raise IntentLayerError("Intent layer returned final_response even though no_execution_confidence <= 9.0.")
-        if confidence <= DIRECT_RESPONSE_THRESHOLD:
+        if confidence >= DIRECT_RESPONSE_THRESHOLD and not final_response:
+            raise IntentLayerError("Intent layer returned no_execution_confidence >= 9.0 without a final_response.")
+        if confidence < DIRECT_RESPONSE_THRESHOLD and final_response is not None:
+            raise IntentLayerError("Intent layer returned final_response even though no_execution_confidence < 9.0.")
+        if confidence < DIRECT_RESPONSE_THRESHOLD:
             final_response = None
 
         return IntentDecision(
@@ -1185,6 +1203,309 @@ class IntentLayerOrchestrator:
                 ),
             ),
             reason=reason,
+        )
+
+    def _select_skill_compat(
+        self,
+        *,
+        intent_decision: IntentDecision,
+        current_message: str,
+        older_context: list[DialogueItem],
+        recent_context: list[DialogueItem],
+        available_skills: list[SkillSpec],
+    ) -> tuple[SkillSelection, SkillSpec | None]:
+        if not available_skills:
+            selection = SkillSelection(
+                should_use_skill=False,
+                skill_name=None,
+                reason="No skills are registered in skills/registry.yaml.",
+                skill_arguments={},
+            )
+            self._log_route(
+                "skill_selection",
+                confidence=float(intent_decision.no_execution_confidence),
+                skill_selected=False,
+                selected_skill="(none)",
+                reason=selection.reason,
+                skill_arguments={},
+            )
+            return selection, None
+
+        if self._skill_selector_agent is None:
+            raise SkillLayerError("Skill selector agent is not configured.")
+
+        prompt = "\n\n".join(
+            [
+                "[INTENT]",
+                intent_decision.intent,
+                "[CURRENT_USER_MESSAGE]",
+                current_message.strip(),
+                "[OLDER_CONTEXT]",
+                format_context(older_context),
+                "[RECENT_CONTEXT]",
+                format_context(recent_context),
+                "[AVAILABLE_SKILLS]",
+                self._build_skills_block(available_skills),
+            ]
+        )
+
+        try:
+            payload = _extract_json_payload(self._skill_selector_agent.input(prompt, max_iterations=1))
+        except Exception as exc:
+            raise SkillLayerError(f"Skill selector execution failed: {exc}") from exc
+
+        should_use_skill = bool(payload.get("should_use_skill"))
+        reason = _require_non_empty_string(payload.get("reason"), field_name="reason", error_type=SkillLayerError)
+
+        if not should_use_skill:
+            selection = SkillSelection(
+                should_use_skill=False,
+                skill_name=None,
+                reason=reason,
+                skill_arguments={},
+            )
+            self._log_route(
+                "skill_selection",
+                confidence=float(intent_decision.no_execution_confidence),
+                skill_selected=False,
+                selected_skill="(none)",
+                reason=selection.reason,
+                skill_arguments={},
+            )
+            return selection, None
+
+        skill_name = _require_non_empty_string(
+            payload.get("skill_name"),
+            field_name="skill_name",
+            error_type=SkillLayerError,
+        )
+        skills_by_name = {skill.name: skill for skill in available_skills}
+        skill_spec = skills_by_name.get(skill_name)
+        if skill_spec is None:
+            raise SkillLayerError(f"Skill selector returned unknown skill '{skill_name}'.")
+
+        validated_arguments = validate_skill_arguments(
+            skill_spec,
+            payload.get("skill_arguments"),
+            error_type=SkillLayerError,
+        )
+        selection = SkillSelection(
+            should_use_skill=True,
+            skill_name=skill_name,
+            reason=reason,
+            skill_arguments=validated_arguments,
+        )
+        self._log_route(
+            "skill_selection",
+            confidence=float(intent_decision.no_execution_confidence),
+            skill_selected=True,
+            selected_skill=skill_name,
+            reason=selection.reason,
+            skill_arguments=validated_arguments,
+        )
+        return selection, skill_spec
+
+    @staticmethod
+    def _build_compat_selected_skill_summary(
+        *,
+        selection: SkillSelection,
+        skill_result: SkillExecutionResult | None,
+    ) -> tuple[str, str]:
+        if selection.should_use_skill and selection.skill_name:
+            route = f"use {selection.skill_name}"
+        else:
+            route = "route to main agent"
+        arguments = json.dumps(selection.skill_arguments, ensure_ascii=False, sort_keys=True)
+        extra_lines = []
+        if skill_result is not None:
+            extra_lines.extend(
+                [
+                    f"skill_completed: {skill_result.completed}",
+                    f"skill_completion_reason: {skill_result.reason}",
+                ]
+            )
+        return route, "\n".join([f"skill_selector_arguments: {arguments}", *extra_lines]).strip()
+
+    def _run_main_agent_compat(
+        self,
+        *,
+        user_message: str,
+        intent_decision: IntentDecision,
+        older_context: list[DialogueItem],
+        recent_context: list[DialogueItem],
+        date_grounding: str,
+        selection: SkillSelection,
+        skill_result: SkillExecutionResult | None,
+        max_iterations: int | None,
+        session: dict[str, Any] | None,
+        images: list[str] | None,
+        files: list[dict[str, Any]] | None,
+    ) -> str:
+        route, selector_details = self._build_compat_selected_skill_summary(
+            selection=selection,
+            skill_result=skill_result,
+        )
+        self._log_route(
+            "main_agent",
+            confidence=float(intent_decision.no_execution_confidence),
+            intent=intent_decision.intent,
+            skill_selector=route,
+        )
+        handoff_prompt = "\n\n".join(
+            [
+                "[INTENT_LAYER_HANDOFF]",
+                f"intent: {intent_decision.intent}",
+                f"skill_selector: {route}",
+                selector_details,
+                "[DATE_GROUNDING]",
+                date_grounding,
+                "[OLDER_CONTEXT]",
+                format_context(older_context),
+                "[RECENT_CONTEXT]",
+                format_context(recent_context),
+                "[USER_MESSAGE]",
+                user_message.strip(),
+            ]
+        )
+        if isinstance(self.current_session, dict):
+            setattr(self._main_agent, "current_session", self.current_session)
+        response = self._main_agent.input(
+            handoff_prompt,
+            max_iterations=max_iterations,
+            session=session,
+            images=images,
+            files=files,
+        )
+        updated_session = getattr(self._main_agent, "current_session", None)
+        if isinstance(updated_session, dict):
+            self.current_session = updated_session
+        return str(response or "").strip()
+
+    def _finalize_skill_compat(
+        self,
+        *,
+        intent_decision: IntentDecision,
+        recent_context: list[DialogueItem],
+        skill_spec: SkillSpec,
+        skill_result: SkillExecutionResult,
+    ) -> tuple[str, str]:
+        if self._finalizer_agent is None:
+            if not skill_result.response:
+                raise SkillLayerError(f"Skill '{skill_spec.name}' completed without a response.")
+            return skill_result.response, "Compatibility mode skipped finalizer."
+
+        prompt = "\n\n".join(
+            [
+                "[INTENT]",
+                intent_decision.intent,
+                "[RECENT_CONTEXT]",
+                format_context(recent_context),
+                "[SELECTED_SKILL]",
+                "\n".join(
+                    [
+                        f"skill_name: {skill_spec.name}",
+                        f"description: {skill_spec.description or '(empty)'}",
+                        f"scope: {skill_spec.scope or '(empty)'}",
+                        f"output: {skill_spec.output or '(empty)'}",
+                    ]
+                ),
+                "[SKILL_RESULT]",
+                skill_result.response or "",
+            ]
+        )
+
+        try:
+            raw_response = self._finalizer_agent.input(prompt, max_iterations=1)
+            payload = _extract_json_payload(raw_response)
+        except Exception as exc:
+            raise SkillLayerError(f"Skill finalizer execution failed: {exc}") from exc
+
+        final_response = _require_non_empty_string(
+            payload.get("final_response"),
+            field_name="final_response",
+            error_type=SkillLayerError,
+        )
+        reason = str(payload.get("reason") or "Skill finalizer completed.").strip() or "Skill finalizer completed."
+        return final_response, reason
+
+    def _run_compatibility_flow(
+        self,
+        *,
+        user_message: str,
+        intent_decision: IntentDecision,
+        available_skills: list[SkillSpec],
+        older_context: list[DialogueItem],
+        recent_context: list[DialogueItem],
+        date_grounding: str,
+        max_iterations: int | None,
+        session: dict[str, Any] | None,
+        images: list[str] | None,
+        files: list[dict[str, Any]] | None,
+    ) -> str:
+        selection, skill_spec = self._select_skill_compat(
+            intent_decision=intent_decision,
+            current_message=user_message,
+            older_context=older_context,
+            recent_context=recent_context,
+            available_skills=available_skills,
+        )
+
+        if not selection.should_use_skill or skill_spec is None:
+            return self._run_main_agent_compat(
+                user_message=user_message,
+                intent_decision=intent_decision,
+                older_context=older_context,
+                recent_context=recent_context,
+                date_grounding=date_grounding,
+                selection=selection,
+                skill_result=None,
+                max_iterations=max_iterations,
+                session=session,
+                images=images,
+                files=files,
+            )
+
+        if self._skill_executor is None:
+            raise SkillLayerError("Skill executor is not configured.")
+
+        skill_result = self._skill_executor.run(
+            skill_spec,
+            skill_arguments=selection.skill_arguments,
+            current_message=user_message,
+            intent_decision=intent_decision,
+            recent_context=recent_context,
+            max_iterations=max_iterations,
+        )
+
+        if skill_result.completed and skill_result.response:
+            self._log_route(
+                "finalizer_started",
+                selected_skill=skill_spec.name,
+            )
+            response, finalizer_reason = self._finalize_skill_compat(
+                intent_decision=intent_decision,
+                recent_context=recent_context,
+                skill_spec=skill_spec,
+                skill_result=skill_result,
+            )
+            self._log_route(
+                "finalizer_finished",
+                reason=finalizer_reason,
+            )
+            return response
+
+        return self._run_main_agent_compat(
+            user_message=user_message,
+            intent_decision=intent_decision,
+            older_context=older_context,
+            recent_context=recent_context,
+            date_grounding=date_grounding,
+            selection=selection,
+            skill_result=skill_result,
+            max_iterations=max_iterations,
+            session=session,
+            images=images,
+            files=files,
         )
 
     def _plan_execution(

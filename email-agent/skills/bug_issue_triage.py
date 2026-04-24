@@ -145,4 +145,8 @@ def execute_skill(*, arguments, used_tools, skill_spec):
                 ]
             )
 
-    return "\n".join(lines)
+    return {
+        "completed": True,
+        "response": "\n".join(lines),
+        "reason": "Collected recent bug-related emails and fetched every matched email body.",
+    }

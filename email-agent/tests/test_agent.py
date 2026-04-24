@@ -71,6 +71,21 @@ def test_agent_has_memory_tools():
     assert "search_memory" in tool_names
 
 
+def test_agent_tools_expose_names_for_host_metadata():
+    """Test that the tool registry exposes the names() interface expected by host()."""
+    os.environ['LINKED_GMAIL'] = 'true'
+
+    import importlib
+    import agent as agent_module
+    importlib.reload(agent_module)
+
+    tool_names = agent_module.agent.tools.names()
+
+    assert "read_inbox" in tool_names
+    assert "search_emails" in tool_names
+    assert "write_memory" in tool_names
+
+
 def test_memory_class_integration():
     """Test that Memory class can be used as tool source."""
     memory = Memory(memory_dir="test_mem")
