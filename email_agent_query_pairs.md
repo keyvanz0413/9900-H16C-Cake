@@ -171,7 +171,7 @@ The user wants the agent to detect and rank emails that require immediate attent
 ## 5. Meeting Scheduling Query
 
 ### Input
-> "Help me schedule this meeting."
+> "Schedule this meeting."
 
 ### Intent
 The user wants the agent to identify, interpret, or assist with meeting-related email threads, including confirmed meeting times or scheduling suggestions.
