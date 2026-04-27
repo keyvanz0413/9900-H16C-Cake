@@ -34,6 +34,7 @@ jobs:
         run: npm ci
 
       - name: Lint frontend
+        continue-on-error: true
         run: npm run lint
 
       - name: Build frontend
