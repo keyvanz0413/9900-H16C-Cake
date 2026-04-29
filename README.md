@@ -15,7 +15,7 @@ Read, search, triage, reply, unsubscribe — all with natural language.
 
 **Cake** is a capstone project (UNSW COMP9900 · Team H16C) that delivers an end-to-end AI email assistant. It pairs a Python multi-agent backend with a modern Next.js chat UI, and runs as a single Docker Compose stack.
 
-Under the hood, Cake uses a **layered intent architecture** — a lightweight intent classifier routes requests to a planner, which picks and parameterizes **skills** (YAML-declared, Python-executed workflows). A main agent handles freeform tool use, while specialized writer agents maintain a persistent user profile, habits, and writing style.
+Under the hood, Cake uses a **layered orchestration architecture**. The intent layer reads the current message together with recent context, older context, and long-term local memory, and decides whether to answer directly or continue execution. If execution is needed, a **serial planner** creates one or more steps. Skill steps are filled by a **skill input resolver** and executed as YAML-declared, Python-run workflows, while open-ended steps are handled by the main tool-using agent. A finalizer then turns all step outputs into one user-facing reply, and dedicated writer agents maintain persistent profile, habit, and writing-style files.
 
 ## Features
 
@@ -30,36 +30,43 @@ Under the hood, Cake uses a **layered intent architecture** — a lightweight in
 
 ## Architecture
 
+```mermaid
+flowchart LR
+    U["User<br/>Browser :3300"] --> O["oo-chat<br/>Next.js UI"]
+
+    subgraph EA["email-agent"]
+        I["Intent Layer<br/>direct-response gate"]
+        P["Planner<br/>serial multi-step"]
+        R["Skill Input Resolver"]
+        S["Python Skills<br/>fixed workflows"]
+        A["Main Agent<br/>ReAct + tools"]
+        T["Tool Layer<br/>Gmail / Outlook / Calendar / Contacts / Attachments / Shell / Todo"]
+        F["Finalizer<br/>one clear reply"]
+        W["Memory Retention Check<br/>+ Writer Agents"]
+        LM[("Local Memory<br/>USER_PROFILE.md<br/>USER_HABITS.md<br/>WRITING_STYLE.md")]
+
+        LM -->|"read only"| I
+        I -->|"execution needed"| P
+        P -->|"skill step"| R
+        P -->|"agent step"| A
+        R --> S
+        S --> T
+        A --> T
+        T --> F
+        F --> W
+        W -->|"update"| LM
+    end
+
+    O --> I
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    User (Browser :3300)                     │
-└─────────────────────┬───────────────────────────────────────┘
-                      │ HTTP
-              ┌───────▼────────┐        ┌──────────────────┐
-              │  oo-chat       │───────▶│   email-agent    │
-              │  Next.js 16    │  :8000 │   FastAPI + LLM  │
-              │  React 19      │        │                  │
-              └────────────────┘        └────────┬─────────┘
-                                                 │
-                        ┌────────────────────────┼────────────────────┐
-                        │                        │                    │
-                   ┌────▼─────┐          ┌───────▼────────┐    ┌──────▼──────┐
-                   │  Intent  │─────────▶│    Planner     │───▶│   Skills    │
-                   │  Layer   │          │  (single-step) │    │  (YAML+PY)  │
-                   └──────────┘          └────────────────┘    └──────┬──────┘
-                                                                      │
-                                         ┌────────────────────────────┤
-                                         │                            │
-                                  ┌──────▼──────┐              ┌──────▼──────┐
-                                  │ Main Agent  │              │  Finalizer  │
-                                  │ (ReAct+Tools)│             │  (writer)   │
-                                  └──────┬──────┘              └─────────────┘
-                                         │
-         ┌───────────────┬───────────────┼───────────────┬───────────────┐
-    ┌────▼────┐    ┌─────▼────┐    ┌─────▼────┐    ┌─────▼────┐    ┌─────▼────┐
-    │  Gmail  │    │ Calendar │    │  Memory  │    │  Shell   │    │  TodoList│
-    └─────────┘    └──────────┘    └──────────┘    └──────────┘    └──────────┘
-```
+
+**How the flow works**
+
+- The **Intent Layer** is the entry gate. It reads the current turn, recent and older dialogue context, plus `USER_PROFILE.md`, `USER_HABITS.md`, and `WRITING_STYLE.md`.
+- If the request is not a direct-response case, the **Planner** creates a **serial multi-step** plan instead of a single action.
+- **Skill steps** go through the **Skill Input Resolver**, then run as explicit Python workflows. **Agent steps** go to the **Main Agent** directly.
+- Both execution paths use the same underlying tool ecosystem, including Gmail / Outlook, calendar integrations, shell, todo, attachments, and unsubscribe tools.
+- The **Finalizer** merges all completed step outputs into one user-facing reply, and a final memory pass decides what should be written back to persistent local memory.
 
 ## Quick Start
 
